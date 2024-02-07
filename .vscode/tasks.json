@@ -1,0 +1,11 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Launch Server and Client",
+      "type": "shell",
+      "command": "./launch.sh",
+      "problemMatcher": []
+    }
+  ]
+}
