@@ -9,59 +9,33 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
 use uuid::Uuid;
 
 use crate::packet::payloads::{MessagePayload, PingPayload};
-use crate::packet::{Action, Packet, Payload};
+use crate::packet::{Action, Packet, PacketConfiguration, Payload};
+use crate::server::packet_processor::process_packet;
+use crate::server::Client;
 use crate::sprintln;
 use crate::util::get_now;
-
-const HEARTBEAT_INTERVAL: u64 = 5;
-const MAX_HEARTBEAT_INTERVAL: u64 = HEARTBEAT_INTERVAL * 3;
 
 /// Used to share clients.
 type ClientsMap = Arc<Mutex<HashMap<Uuid, Client>>>;
 
-/// Used to determine how a client quit/exit.
-enum ClientQuit {
-    Leave,
-    Disconnect,
-}
-
-/// Holds all of the relevant client information for send/recving packets.
-#[derive(Clone)]
-struct Client {
-    uuid: Uuid,
-    _addr: SocketAddr,
-    tx: mpsc::Sender<Vec<u8>>,
-    ping_id: Uuid,
-    last_ping: u64,
-}
-
-impl Client {
-    /// Create a new instance of the client to be tracked.
-    pub fn new(uuid: Uuid, _addr: SocketAddr, tx: mpsc::Sender<Vec<u8>>) -> Client {
-        Client {
-            uuid,
-            _addr,
-            tx,
-            ping_id: Uuid::nil(),
-            last_ping: get_now(),
-        }
-    }
-}
+const HEARTBEAT_INTERVAL: u64 = 5;
+const MAX_HEARTBEAT_INTERVAL: u64 = HEARTBEAT_INTERVAL * 3;
 
 /// Server instance responsible for managing clients and send/recving updates.
-pub struct Server {
+pub struct SocketServer {
     /// Current active clients.
     clients: ClientsMap,
 }
 
-impl Server {
+impl SocketServer {
     /// Create a new instance of the srever.
-    fn new() -> Server {
-        Server {
+    fn new() -> Self {
+        Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -74,7 +48,7 @@ impl Server {
         if block {
             // Use `block_on` to block the current thread until the future completes.
             rt.block_on(async move {
-                let mut server = Server::new();
+                let mut server = Self::new();
                 if let Err(why) = server.async_main(address).await {
                     eprintln!("ERROR: {}", why);
                 };
@@ -82,7 +56,7 @@ impl Server {
         } else {
             // For non-blocking behavior, spawn the future without waiting for it to complete.
             rt.spawn(async move {
-                let mut server = Server::new();
+                let mut server = Self::new();
                 if let Err(why) = server.async_main(address).await {
                     eprintln!("ERROR: {}", why);
                 };
@@ -188,7 +162,7 @@ impl Server {
         packet: Packet,
         filter: Option<&[Uuid]>,
     ) -> Result<(), Box<dyn Error>> {
-        Server::exec_broadcast(&mut self.clients, packet, filter).await
+        Self::exec_broadcast(&mut self.clients, packet, filter).await
     }
 
     /// Broadcasts a packet to multiple clients.
@@ -210,7 +184,7 @@ impl Server {
                     .iter()
                     .map(|(_addr, tx)| tx.clone())
                     .collect::<Vec<_>>(),
-                Some(uuids) if uuids.is_empty() => lock
+                Some(uuids) if !uuids.is_empty() => lock
                     .iter()
                     .filter(|(id, _)| uuids.contains(id))
                     .map(|(_addr, tx)| tx.clone())
@@ -241,56 +215,17 @@ impl Server {
         Ok(())
     }
 
-    /// Sends data from handler to server.
-    async fn from_handler(tx: &mpsc::Sender<Vec<u8>>, packet: Packet) {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let _ = tx.send(packet.to_bytes()).await;
-        });
-    }
-
-    /// Processes all packet types.
-    async fn process_packet(
-        tx: &mut mpsc::Sender<Vec<u8>>,
-        uuid: Uuid,
-        mut packet: Packet,
-    ) -> Result<Option<Packet>, ClientQuit> {
-        let (action, payload) = match packet.action() {
-            Action::Ping => match packet.payload() {
-                // Client needs to be updated to ensure it is not disconnected.
-                Payload::Ping(_) => {
-                    packet = packet.set_uuid(uuid); // Update the packet UUID to ensure client does not spoof.
-                    Server::from_handler(tx, packet).await;
-                    return Ok(None);
-                }
-                _ => return Ok(None),
-            },
-            Action::ClientJoin => (Action::Success, Payload::Empty),
-            Action::ClientLeave => return Err(ClientQuit::Leave),
-            _ => return Ok(None),
-        };
-
-        Ok(Some(Packet::new(action, uuid, payload)))
-    }
-
     /// Listens for new connections.
-    async fn listen(&mut self, mut socket: TcpStream, addr: SocketAddr) -> ClientQuit {
+    async fn listen(&mut self, mut socket: TcpStream, addr: SocketAddr) {
         // Channels for send/recving meessages from client.
         let (ctx, mut crx) = mpsc::channel::<Vec<u8>>(100);
 
         // Channels for send/recving meessages from handler.
         let (mut htx, mut hrx) = mpsc::channel::<Vec<u8>>(100);
 
-        // Assing UUID to the new client.
+        // Assign UUID to the new client.
         let uuid = Uuid::new_v4();
-        let output = format!("{} has joined.", uuid);
-        sprintln!("{}", output);
-        let payload = Payload::Message(MessagePayload { message: output });
-
-        // Broadcast client joining.
-        let packet = Packet::new(Action::Message, Uuid::nil(), payload);
-        let _ = self.broadcast(packet, None).await;
-
+        sprintln!("{} has joined.", uuid);
         {
             // Store the sender in the clients map
             let mut clients = self.clients.lock().unwrap();
@@ -299,31 +234,52 @@ impl Server {
 
         // Start packet handler.
         let mut buf = vec![0; 1024];
-        let mut clients_clone = self.clients.clone();
-        let joiner = tokio::spawn(async move {
-            let action = loop {
+        let mut all_clients = self.clients.clone();
+        let result: JoinHandle<()> = tokio::spawn(async move {
+            loop {
                 tokio::select! {
                     // Read a packet coming from client.
                     size = socket.read(&mut buf) => {
                         let n = match size {
-                            Ok(0) => return ClientQuit::Disconnect,
+                            Ok(0) => return,
                             Ok(n) => n,
-                            Err(_) => return ClientQuit::Disconnect,
+                            Err(_) => return,
                         };
 
-                        let packet = Packet::from_bytes(&buf[..n]);
-
                         // Process the incoming packet from the client.
-                        match Server::process_packet(&mut htx, uuid, packet).await {
-                            Ok(Some(response)) => {
-                                if let Err(why) = socket.write_all(&response.to_bytes()).await {
+                        let packet = Packet::from_bytes(&buf[..n]);
+                        let mut end_session: bool = false;
+                        match process_packet(&mut htx, uuid, packet).await {
+                            PacketConfiguration::Empty => (),
+                            PacketConfiguration::Single(packet) => {
+                                if let Err(why) = socket.write_all(&packet.to_bytes()).await {
                                     sprintln!("ERROR WRITING {}", why);
                                 }
-                            },
-                            Err(action) => break action,
-                            _ => ()
+                            }
+                            PacketConfiguration::Broadcast(packet, _scope) => {
+                                // NOTE: Currently assuming GLOBAL scope for broadcast.
+                                let c: Vec<Uuid> = all_clients.lock().unwrap().keys().cloned().collect();
+                                end_session = packet.action() == Action::ClientLeave;
+                                if let Err(why) = Self::exec_broadcast(&mut all_clients, packet, Some(&c)).await {
+                                    sprintln!("ERROR BROADCAST {}", why);
+                                }
+                            }
+                            PacketConfiguration::SuccessBroadcast(to_client, to_broadcast, _scope) => {
+                                // NOTE: Currently assuming GLOBAL scope for broadcast.
+                                let c: Vec<Uuid> = all_clients.lock().unwrap().keys().cloned().filter(|u| *u != uuid).collect();
+                                if let Err(why) = socket.write_all(&to_client.to_bytes()).await {
+                                    sprintln!("ERROR WRITING {}", why);
+                                }
+                                if let Err(why) = Self::exec_broadcast(&mut all_clients, to_broadcast, Some(&c)).await {
+                                    sprintln!("ERROR BROADCAST {}", why);
+                                }
+                            }
                         }
-                    },
+
+                        if end_session {
+                            return;
+                        }
+                    }
                     // Broadcasted message that needs to be sent.
                     message = crx.recv() => {
                         if let Some(msg) = message {
@@ -337,7 +293,7 @@ impl Server {
                         if let Some(msg) = handler_message {
                             let packet: Packet = Packet::from_bytes(&msg) ;
                             if let Payload::Ping(ping) = packet.payload() {
-                                if let Some(client) = clients_clone.lock().unwrap().get_mut(&packet.uuid()) {
+                                if let Some(client) = all_clients.lock().unwrap().get_mut(&packet.uuid()) {
                                     if client.ping_id == ping.uuid {
                                         client.last_ping = get_now();
                                     }
@@ -346,27 +302,15 @@ impl Server {
                         }
                     }
                 }
-            };
-
-            // Client is no longer being processed, broadcast to all other clients.
-            let client = clients_clone.lock().unwrap().remove(&uuid);
-            if let Some(client) = client {
-                let uuid = client.uuid;
-                let message = match action {
-                    ClientQuit::Disconnect => format!("{} has disconnected.", uuid),
-                    ClientQuit::Leave => format!("{} has left.", uuid),
-                };
-
-                sprintln!("{}", message);
-                let payload = Payload::Message(MessagePayload { message });
-
-                let packet = Packet::new(Action::Message, Uuid::nil(), payload);
-                let _ = Server::exec_broadcast(&mut clients_clone, packet, None).await;
             }
-
-            action
         });
 
-        joiner.await.expect("Unable to join server.")
+        // Remove the client from being tracked.
+        if result.await.is_err() {
+            sprintln!("Problem with {} exiting.", uuid);
+        }
+
+        sprintln!("{} has left.", uuid);
+        self.clients.lock().unwrap().remove(&uuid);
     }
 }

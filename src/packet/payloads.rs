@@ -28,3 +28,16 @@ impl PingPayload {
         PingPayload { uuid }
     }
 }
+
+/// Movement payload, used to send current position for an entity.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MovementPayload {
+    pub position: (i32, i32),
+}
+
+impl MovementPayload {
+    /// Create a new position payload.
+    pub fn new(position: (i32, i32)) -> MovementPayload {
+        MovementPayload { position }
+    }
+}

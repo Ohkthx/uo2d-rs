@@ -6,9 +6,11 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::client::packet_processor::processor;
 use crate::cprintln;
-use crate::packet::payloads::PingPayload;
 use crate::packet::{Action, Packet, Payload};
+
+use super::gamestate::Gamestate;
 
 /// Used to communicate to the remove server.
 pub struct SocketClient {
@@ -82,38 +84,11 @@ impl SocketClient {
     }
 
     /// Processes a packet, returns an action and payload if one needs to be sent.
-    pub fn process_packet(&mut self, packet: Packet) -> Result<Option<(Action, Payload)>, String> {
-        let (action, payload) = match packet.action() {
-            Action::Ping => match packet.payload() {
-                Payload::Ping(ping) => {
-                    cprintln!("PING {} from server", ping.uuid);
-                    (Action::Ping, Payload::Ping(PingPayload::new(ping.uuid)))
-                }
-                _ => return Ok(None),
-            },
-            Action::Shutdown => match packet.payload() {
-                Payload::Message(msg) => {
-                    cprintln!("{}", msg.message);
-                    return Err(String::from("Server shutdown."));
-                }
-                _ => {
-                    return Err(String::from("Server shutdown."));
-                }
-            },
-            Action::Success => {
-                self.uuid = packet.uuid();
-                return Ok(None);
-            }
-            Action::Message => match packet.payload() {
-                Payload::Message(msg) => {
-                    cprintln!("{}", msg.message);
-                    return Ok(None);
-                }
-                _ => return Ok(None),
-            },
-            _ => return Ok(None),
-        };
-
-        Ok(Some((action, payload)))
+    pub fn process_packet(
+        &mut self,
+        gamestate: &mut Gamestate,
+        packet: Packet,
+    ) -> Option<(Action, Payload)> {
+        processor(self, gamestate, packet)
     }
 }

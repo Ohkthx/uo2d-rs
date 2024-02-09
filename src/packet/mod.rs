@@ -10,8 +10,21 @@ use self::payloads::*;
 
 pub const PACKET_VERSION: u8 = 0x01;
 
+pub enum BroadcastScope {
+    Local,
+    Global,
+}
+
+#[allow(dead_code)]
+pub enum PacketConfiguration {
+    Empty,
+    Single(Packet),
+    Broadcast(Packet, BroadcastScope),
+    SuccessBroadcast(Packet, Packet, BroadcastScope),
+}
+
 /// Action that represents the Packet.
-#[derive(Debug, FromPrimitive, ToPrimitive)]
+#[derive(Debug, FromPrimitive, ToPrimitive, PartialEq)]
 pub enum Action {
     Ping = 0x1,
     Success,
@@ -20,6 +33,7 @@ pub enum Action {
     ClientJoin,
     ClientLeave,
     Message,
+    Movement,
 }
 
 impl Action {
@@ -44,4 +58,5 @@ pub enum Payload {
     Invalid,
     Ping(PingPayload),
     Message(MessagePayload),
+    Movement(MovementPayload),
 }

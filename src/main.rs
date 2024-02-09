@@ -6,7 +6,7 @@ mod util;
 use std::{env, error::Error, thread::sleep, time::Duration};
 
 use client::Client;
-use server::Server;
+use server::SocketServer;
 
 const ADDRESS: &str = "127.0.0.1:31013";
 
@@ -15,13 +15,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Start either server or client.
     if args.contains(&String::from("--server")) {
-        Server::start(ADDRESS, true)?;
+        SocketServer::start(ADDRESS, true)?;
     } else {
         // Start the server instance.
         if args.contains(&String::from("--solo")) {
             let server_address = ADDRESS.to_string();
             std::thread::spawn(move || {
-                if let Err(e) = Server::start(&server_address, true) {
+                if let Err(e) = SocketServer::start(&server_address, true) {
                     eprintln!("Server failed to start: {}", e);
                 }
             });
