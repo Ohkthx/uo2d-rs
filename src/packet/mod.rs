@@ -41,6 +41,7 @@ impl Action {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Payload {
     Empty,
-    Message(MessagePayload),
+    Invalid,
     Ping(PingPayload),
+    Message(MessagePayload),
 }

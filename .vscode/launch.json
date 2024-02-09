@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Launch with --solo",
+      "program": "${workspaceFolder}/target/debug/uo2d",
+      "args": ["--solo"],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "rust: cargo build",
+      "sourceLanguages": ["rust"]
+    }
+  ]
+}

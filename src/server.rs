@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::io::{self, ErrorKind};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::runtime;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 use tokio::time::{interval, sleep, timeout};
@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::packet::payloads::{MessagePayload, PingPayload};
 use crate::packet::{Action, Packet, Payload};
 use crate::sprintln;
-use crate::util::{get_now, get_utc};
+use crate::util::get_now;
 
 const HEARTBEAT_INTERVAL: u64 = 5;
 const MAX_HEARTBEAT_INTERVAL: u64 = HEARTBEAT_INTERVAL * 3;
@@ -60,18 +60,43 @@ pub struct Server {
 
 impl Server {
     /// Create a new instance of the srever.
-    pub fn new() -> Server {
+    fn new() -> Server {
         Server {
             clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Starts the server for listening for incoming connections.
-    pub async fn start(&mut self, address: &str) -> Result<(), Box<dyn Error>> {
-        let listener = TcpListener::bind(address)
+    pub fn start(address: &str, block: bool) -> Result<(), Box<dyn Error>> {
+        let address = address.to_string();
+
+        let rt = runtime::Runtime::new()?;
+        if block {
+            // Use `block_on` to block the current thread until the future completes.
+            rt.block_on(async move {
+                let mut server = Server::new();
+                if let Err(why) = server.async_main(address).await {
+                    eprintln!("ERROR: {}", why);
+                };
+            });
+        } else {
+            // For non-blocking behavior, spawn the future without waiting for it to complete.
+            rt.spawn(async move {
+                let mut server = Server::new();
+                if let Err(why) = server.async_main(address).await {
+                    eprintln!("ERROR: {}", why);
+                };
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn async_main(&mut self, address: String) -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind(address.clone())
             .await
             .expect("Failed to bind to address");
-        println!("Listening on {}", address);
+        sprintln!("Listening on {}", address);
 
         let mut ping_interval = interval(Duration::from_secs(HEARTBEAT_INTERVAL));
 
@@ -83,8 +108,8 @@ impl Server {
                     signal(SignalKind::terminate()).expect("Failed to bind SIGTERM handler");
 
                 tokio::select! {
-                    _ = sigint.recv() => println!("SIGINT received."),
-                    _ = sigterm.recv() => println!("SIGTERM received."),
+                    _ = sigint.recv() => sprintln!("SIGINT received."),
+                    _ = sigterm.recv() => sprintln!("SIGTERM received."),
                 }
             };
 
@@ -175,7 +200,7 @@ impl Server {
         packet: Packet,
         filter: Option<&[Uuid]>,
     ) -> Result<(), Box<dyn Error>> {
-        let packet_bytes = packet.to_bytes()?;
+        let packet_bytes = packet.to_bytes();
 
         // Get the clients to send to.
         let clients = {
@@ -219,11 +244,9 @@ impl Server {
     /// Sends data from handler to server.
     async fn from_handler(tx: &mpsc::Sender<Vec<u8>>, packet: Packet) {
         let tx = tx.clone();
-        if let Ok(bytes) = packet.to_bytes() {
-            tokio::spawn(async move {
-                let _ = tx.send(bytes).await;
-            });
-        }
+        tokio::spawn(async move {
+            let _ = tx.send(packet.to_bytes()).await;
+        });
     }
 
     /// Processes all packet types.
@@ -232,11 +255,11 @@ impl Server {
         uuid: Uuid,
         mut packet: Packet,
     ) -> Result<Option<Packet>, ClientQuit> {
-        let (action, payload) = match packet.action {
-            Action::Ping => match packet.payload {
+        let (action, payload) = match packet.action() {
+            Action::Ping => match packet.payload() {
                 // Client needs to be updated to ensure it is not disconnected.
                 Payload::Ping(_) => {
-                    packet.uuid = uuid; // Update the packet UUID to ensure client does not spoof.
+                    packet = packet.set_uuid(uuid); // Update the packet UUID to ensure client does not spoof.
                     Server::from_handler(tx, packet).await;
                     return Ok(None);
                 }
@@ -251,7 +274,7 @@ impl Server {
     }
 
     /// Listens for new connections.
-    async fn listen(&mut self, mut socket: TcpStream, addr: SocketAddr) {
+    async fn listen(&mut self, mut socket: TcpStream, addr: SocketAddr) -> ClientQuit {
         // Channels for send/recving meessages from client.
         let (ctx, mut crx) = mpsc::channel::<Vec<u8>>(100);
 
@@ -277,26 +300,25 @@ impl Server {
         // Start packet handler.
         let mut buf = vec![0; 1024];
         let mut clients_clone = self.clients.clone();
-        tokio::spawn(async move {
+        let joiner = tokio::spawn(async move {
             let action = loop {
                 tokio::select! {
                     // Read a packet coming from client.
                     size = socket.read(&mut buf) => {
-                        let n = size?;
-                        if n == 0 {
-                            return Ok(ClientQuit::Disconnect);
-                        }
-
-                        let packet = match Packet::from_bytes(&buf[..n]) {
-                            Ok(packet) => packet,
-                            Err(_) =>return Err(io::Error::from(ErrorKind::InvalidData)),
+                        let n = match size {
+                            Ok(0) => return ClientQuit::Disconnect,
+                            Ok(n) => n,
+                            Err(_) => return ClientQuit::Disconnect,
                         };
+
+                        let packet = Packet::from_bytes(&buf[..n]);
 
                         // Process the incoming packet from the client.
                         match Server::process_packet(&mut htx, uuid, packet).await {
                             Ok(Some(response)) => {
-                                let res = response.to_bytes().map_err(|_| io::Error::from(ErrorKind::InvalidData))?;
-                                socket.write_all(&res).await?;
+                                if let Err(why) = socket.write_all(&response.to_bytes()).await {
+                                    sprintln!("ERROR WRITING {}", why);
+                                }
                             },
                             Err(action) => break action,
                             _ => ()
@@ -305,19 +327,17 @@ impl Server {
                     // Broadcasted message that needs to be sent.
                     message = crx.recv() => {
                         if let Some(msg) = message {
-                            socket.write_all(&msg).await?;
+                            if let Err(why) = socket.write_all(&msg).await {
+                                sprintln!("ERROR WRITING {}", why);
+                            }
                         }
                     },
                     // Message from the packet processor.
                     handler_message = hrx.recv() => {
                         if let Some(msg) = handler_message {
-                            let packet: Packet = match Packet::from_bytes(&msg) {
-                                Ok(packet) => packet,
-                                Err(_) =>return Err(io::Error::from(ErrorKind::InvalidData)),
-                            };
-
-                            if let Payload::Ping(ping) = packet.payload {
-                                if let Some(client) = clients_clone.lock().unwrap().get_mut(&packet.uuid) {
+                            let packet: Packet = Packet::from_bytes(&msg) ;
+                            if let Payload::Ping(ping) = packet.payload() {
+                                if let Some(client) = clients_clone.lock().unwrap().get_mut(&packet.uuid()) {
                                     if client.ping_id == ping.uuid {
                                         client.last_ping = get_now();
                                     }
@@ -344,7 +364,9 @@ impl Server {
                 let _ = Server::exec_broadcast(&mut clients_clone, packet, None).await;
             }
 
-            Ok(action)
+            action
         });
+
+        joiner.await.expect("Unable to join server.")
     }
 }
