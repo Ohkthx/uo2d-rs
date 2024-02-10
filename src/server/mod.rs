@@ -1,18 +1,26 @@
+use std::error::Error;
 use std::net::SocketAddr;
+use std::thread::sleep;
+use std::time::Duration;
 
 pub use socket_server::SocketServer;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::util::get_now;
+use crate::cache::PacketCache;
+use crate::packet::PacketConfiguration;
+use crate::{sprintln, util::get_now};
 
+use self::gamestate::Gamestate;
+
+mod gamestate;
 mod packet_processor;
 pub mod socket_server;
 
 /// Holds all of the relevant client information for send/recving packets.
 #[derive(Clone)]
 pub(crate) struct Client {
-    uuid: Uuid,
+    pub(crate) uuid: Uuid,
     _addr: SocketAddr,
     tx: mpsc::Sender<Vec<u8>>,
     ping_id: Uuid,
@@ -29,5 +37,31 @@ impl Client {
             ping_id: Uuid::nil(),
             last_ping: get_now(),
         }
+    }
+}
+
+pub struct Server {}
+
+impl Server {
+    /// Starts the client, this begins the remote listerning and graphics.
+    pub fn start(address: &str) -> Result<(), Box<dyn Error>> {
+        let (tx, rx) = mpsc::channel::<PacketConfiguration>(32);
+
+        // Create socket and listen for connections.
+        let packet_cache = PacketCache::new();
+        let addr_clone = address.to_string();
+
+        let cache = packet_cache.clone();
+        std::thread::spawn(move || {
+            if let Err(why) = SocketServer::start(&addr_clone, rx, cache) {
+                sprintln!("ERROR stopping socket server {}", why);
+            }
+        });
+
+        let mut gamestate = Gamestate::new(tx, packet_cache);
+        gamestate.start();
+
+        sleep(Duration::from_secs(1));
+        Ok(())
     }
 }

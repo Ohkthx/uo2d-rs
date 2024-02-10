@@ -2,7 +2,8 @@ use uuid::Uuid;
 
 use crate::{cprintln, packet::*};
 
-use super::{gamestate::Gamestate, socket_client::SocketClient};
+use super::gamestate::Gamestate;
+use super::socket_client::SocketClient;
 
 /// Processes all packet types.
 pub(crate) fn processor(
@@ -15,6 +16,7 @@ pub(crate) fn processor(
     match packet.action() {
         Action::Ping => ping(payload),
         Action::Success => success(client, puuid),
+        Action::Shutdown => shutdown(gamestate),
         Action::Message => message(puuid, payload),
         Action::ClientJoin => client_join(gamestate, puuid, payload),
         Action::ClientLeave => client_leave(gamestate, puuid),
@@ -34,6 +36,12 @@ fn ping(payload: Payload) -> Option<(Action, Payload)> {
 
 fn success(client: &mut SocketClient, uuid: Uuid) -> Option<(Action, Payload)> {
     client.uuid = uuid;
+    None
+}
+
+fn shutdown(gamestate: &mut Gamestate) -> Option<(Action, Payload)> {
+    gamestate.kill = true;
+    cprintln!("Server is shutting down.");
     None
 }
 

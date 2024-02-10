@@ -1,18 +1,18 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::error::Error;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime;
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Receiver};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
 use uuid::Uuid;
 
+use crate::cache::{ClientCache, PacketCache};
 use crate::packet::payloads::{MessagePayload, PingPayload};
 use crate::packet::{Action, Packet, PacketConfiguration, Payload};
 use crate::server::packet_processor::process_packet;
@@ -20,53 +20,50 @@ use crate::server::Client;
 use crate::sprintln;
 use crate::util::get_now;
 
-/// Used to share clients.
-type ClientsMap = Arc<Mutex<HashMap<Uuid, Client>>>;
-
 const HEARTBEAT_INTERVAL: u64 = 5;
 const MAX_HEARTBEAT_INTERVAL: u64 = HEARTBEAT_INTERVAL * 3;
 
 /// Server instance responsible for managing clients and send/recving updates.
 pub struct SocketServer {
     /// Current active clients.
-    clients: ClientsMap,
+    client_cache: ClientCache,
+    /// Cached packets for the gamestate.
+    packet_cache: PacketCache,
 }
 
 impl SocketServer {
-    /// Create a new instance of the srever.
-    fn new() -> Self {
+    fn new(packet_cache: PacketCache) -> Self {
         Self {
-            clients: Arc::new(Mutex::new(HashMap::new())),
+            client_cache: ClientCache::new(),
+            packet_cache,
         }
     }
 
     /// Starts the server for listening for incoming connections.
-    pub fn start(address: &str, block: bool) -> Result<(), Box<dyn Error>> {
-        let address = address.to_string();
+    pub fn start(
+        address: &str,
+        receiver: Receiver<PacketConfiguration>,
+        cache: PacketCache,
+    ) -> Result<(), Box<dyn Error>> {
+        let addr_clone = address.to_string();
 
         let rt = runtime::Runtime::new()?;
-        if block {
-            // Use `block_on` to block the current thread until the future completes.
-            rt.block_on(async move {
-                let mut server = Self::new();
-                if let Err(why) = server.async_main(address).await {
-                    eprintln!("ERROR: {}", why);
-                };
-            });
-        } else {
-            // For non-blocking behavior, spawn the future without waiting for it to complete.
-            rt.spawn(async move {
-                let mut server = Self::new();
-                if let Err(why) = server.async_main(address).await {
-                    eprintln!("ERROR: {}", why);
-                };
-            });
-        }
+        // Use `block_on` to block the current thread until the future completes.
+        rt.block_on(async move {
+            let server = Self::new(cache);
+            if let Err(why) = server.async_main(receiver, addr_clone).await {
+                eprintln!("ERROR: {}", why);
+            };
+        });
 
         Ok(())
     }
 
-    async fn async_main(&mut self, address: String) -> Result<(), Box<dyn Error>> {
+    async fn async_main(
+        &self,
+        mut gs_rx: Receiver<PacketConfiguration>,
+        address: String,
+    ) -> Result<(), Box<dyn Error>> {
         let listener = TcpListener::bind(address.clone())
             .await
             .expect("Failed to bind to address");
@@ -97,6 +94,20 @@ impl SocketServer {
                 _ = ping_interval.tick() => {
                     self.send_heartbeat().await.expect("Failed to send heartbeat");
                 },
+                // Packet from the gamestate that needs to be sent out.
+                packet = gs_rx.recv() => {
+                    if let Some(config) = packet {
+                        let response = match config {
+                            PacketConfiguration::Single(packet) => self.send_packet(packet.uuid(), packet).await,
+                            PacketConfiguration::Broadcast(packet, _scope) => self.broadcast(packet, None).await,
+                            _ => Ok(())
+                        };
+
+                        if let Err(why) = response {
+                            sprintln!("FORWARD {}", why);
+                        }
+                    }
+                },
                 // Shutdown signal received.
                 _ = shutdown_signals => {
                     sprintln!("Shutting down.");
@@ -106,6 +117,7 @@ impl SocketServer {
                         Payload::Message(MessagePayload::new("Server is shutting down.")),
                     );
 
+                    self.packet_cache.add(packet.clone());
                     self.broadcast(packet, None).await?;
                     sleep(Duration::from_secs(1)).await;
                     break;
@@ -117,7 +129,7 @@ impl SocketServer {
     }
 
     /// Sends a packet for the clients to respond to, ensures they are still alive.
-    async fn send_heartbeat(&mut self) -> Result<(), Box<dyn Error>> {
+    async fn send_heartbeat(&self) -> Result<(), Box<dyn Error>> {
         // UUID they must respond with.
         let ping_id = Uuid::new_v4();
 
@@ -130,10 +142,10 @@ impl SocketServer {
         // Update and clean the clients.
         {
             let mut expired: HashSet<Uuid> = HashSet::new();
-            let mut clients = self.clients.lock().unwrap();
+            let clients = self.client_cache.clone();
             let now = get_now();
 
-            for (_, client) in clients.iter_mut() {
+            for (_, client) in clients.lock().iter_mut() {
                 if now - client.last_ping > MAX_HEARTBEAT_INTERVAL {
                     expired.insert(client.uuid);
                 } else {
@@ -153,24 +165,44 @@ impl SocketServer {
         Ok(())
     }
 
-    /// Broadcasts a packet to multiple clients.
-    /// If filter is None, broadcast to all clients in `clients_map`.
-    /// If filter is Some and not empty, broadcast to only UUIDs in `clients_map`.
-    /// If filter is Some and empty, broadcast to nobody.
-    pub async fn broadcast(
-        &mut self,
-        packet: Packet,
-        filter: Option<&[Uuid]>,
-    ) -> Result<(), Box<dyn Error>> {
-        Self::exec_broadcast(&mut self.clients, packet, filter).await
+    /// Sends a packet to the client with the uuid.
+    pub async fn send_packet(&self, uuid: Uuid, packet: Packet) -> Result<(), Box<dyn Error>> {
+        let bytes = packet.to_bytes();
+        let clients = self.client_cache.clone();
+
+        // Spawn the async operation
+        tokio::spawn(async move {
+            // Lock and immediately drop to minimize lock holding time
+            if let Some(client) = clients.get(&uuid) {
+                let _ = timeout(
+                    Duration::from_secs(MAX_HEARTBEAT_INTERVAL),
+                    client.tx.send(bytes),
+                )
+                .await;
+            }
+        });
+
+        Ok(())
     }
 
     /// Broadcasts a packet to multiple clients.
-    /// If filter is None, broadcast to all clients in `clients_map`.
-    /// If filter is Some and not empty, broadcast to only UUIDs in `clients_map`.
+    /// If filter is None, broadcast to all clients in `cache`.
+    /// If filter is Some and not empty, broadcast to only UUIDs in `cache`.
+    /// If filter is Some and empty, broadcast to nobody.
+    pub async fn broadcast(
+        &self,
+        packet: Packet,
+        filter: Option<&[Uuid]>,
+    ) -> Result<(), Box<dyn Error>> {
+        Self::exec_broadcast(&self.client_cache, packet, filter).await
+    }
+
+    /// Broadcasts a packet to multiple clients.
+    /// If filter is None, broadcast to all clients in `cache`.
+    /// If filter is Some and not empty, broadcast to only UUIDs in `cache`.
     /// If filter is Some and empty, broadcast to nobody.
     async fn exec_broadcast(
-        clients_map: &mut ClientsMap,
+        cache: &ClientCache,
         packet: Packet,
         filter: Option<&[Uuid]>,
     ) -> Result<(), Box<dyn Error>> {
@@ -178,16 +210,12 @@ impl SocketServer {
 
         // Get the clients to send to.
         let clients = {
-            let lock = clients_map.lock().unwrap();
             match filter {
-                None => lock
-                    .iter()
-                    .map(|(_addr, tx)| tx.clone())
-                    .collect::<Vec<_>>(),
-                Some(uuids) if !uuids.is_empty() => lock
-                    .iter()
-                    .filter(|(id, _)| uuids.contains(id))
-                    .map(|(_addr, tx)| tx.clone())
+                None => cache.values(),
+                Some(uuids) if !uuids.is_empty() => cache
+                    .values()
+                    .into_iter()
+                    .filter(|client| uuids.contains(&client.uuid))
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
             }
@@ -216,7 +244,7 @@ impl SocketServer {
     }
 
     /// Listens for new connections.
-    async fn listen(&mut self, mut socket: TcpStream, addr: SocketAddr) {
+    async fn listen(&self, mut socket: TcpStream, addr: SocketAddr) {
         // Channels for send/recving meessages from client.
         let (ctx, mut crx) = mpsc::channel::<Vec<u8>>(100);
 
@@ -226,15 +254,12 @@ impl SocketServer {
         // Assign UUID to the new client.
         let uuid = Uuid::new_v4();
         sprintln!("{} has joined.", uuid);
-        {
-            // Store the sender in the clients map
-            let mut clients = self.clients.lock().unwrap();
-            clients.insert(uuid, Client::new(uuid, addr, ctx));
-        };
+        self.client_cache.add(Client::new(uuid, addr, ctx));
 
         // Start packet handler.
         let mut buf = vec![0; 1024];
-        let mut all_clients = self.clients.clone();
+        let all_clients = self.client_cache.clone();
+        let packet_cache = self.packet_cache.clone();
         let result: JoinHandle<()> = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -249,7 +274,7 @@ impl SocketServer {
                         // Process the incoming packet from the client.
                         let packet = Packet::from_bytes(&buf[..n]);
                         let mut end_session: bool = false;
-                        match process_packet(&mut htx, uuid, packet).await {
+                        match process_packet(&packet_cache, &mut htx, uuid, packet).await {
                             PacketConfiguration::Empty => (),
                             PacketConfiguration::Single(packet) => {
                                 if let Err(why) = socket.write_all(&packet.to_bytes()).await {
@@ -258,19 +283,19 @@ impl SocketServer {
                             }
                             PacketConfiguration::Broadcast(packet, _scope) => {
                                 // NOTE: Currently assuming GLOBAL scope for broadcast.
-                                let c: Vec<Uuid> = all_clients.lock().unwrap().keys().cloned().collect();
+                                let c: Vec<Uuid> = all_clients.keys();
                                 end_session = packet.action() == Action::ClientLeave;
-                                if let Err(why) = Self::exec_broadcast(&mut all_clients, packet, Some(&c)).await {
+                                if let Err(why) = Self::exec_broadcast(&all_clients, packet, Some(&c)).await {
                                     sprintln!("ERROR BROADCAST {}", why);
                                 }
                             }
                             PacketConfiguration::SuccessBroadcast(to_client, to_broadcast, _scope) => {
                                 // NOTE: Currently assuming GLOBAL scope for broadcast.
-                                let c: Vec<Uuid> = all_clients.lock().unwrap().keys().cloned().filter(|u| *u != uuid).collect();
+                                let c: Vec<Uuid> = all_clients.keys().into_iter().filter(|u| *u != uuid).collect();
                                 if let Err(why) = socket.write_all(&to_client.to_bytes()).await {
                                     sprintln!("ERROR WRITING {}", why);
                                 }
-                                if let Err(why) = Self::exec_broadcast(&mut all_clients, to_broadcast, Some(&c)).await {
+                                if let Err(why) = Self::exec_broadcast(&all_clients, to_broadcast, Some(&c)).await {
                                     sprintln!("ERROR BROADCAST {}", why);
                                 }
                             }
@@ -293,7 +318,7 @@ impl SocketServer {
                         if let Some(msg) = handler_message {
                             let packet: Packet = Packet::from_bytes(&msg) ;
                             if let Payload::Ping(ping) = packet.payload() {
-                                if let Some(client) = all_clients.lock().unwrap().get_mut(&packet.uuid()) {
+                                if let Some(client) = all_clients.lock().get_mut(&packet.uuid()) {
                                     if client.ping_id == ping.uuid {
                                         client.last_ping = get_now();
                                     }
@@ -311,6 +336,6 @@ impl SocketServer {
         }
 
         sprintln!("{} has left.", uuid);
-        self.clients.lock().unwrap().remove(&uuid);
+        self.client_cache.remove(&uuid);
     }
 }

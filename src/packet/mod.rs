@@ -3,10 +3,10 @@ pub mod payloads;
 
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
-pub use packet_util::*;
 use serde::{Deserialize, Serialize};
 
 use self::payloads::*;
+pub use packet_util::*;
 
 pub const PACKET_VERSION: u8 = 0x01;
 

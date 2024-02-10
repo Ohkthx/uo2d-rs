@@ -7,7 +7,7 @@ use super::{Action, Payload, PACKET_VERSION};
 const DATA_BASE_SIZE: usize = 32;
 
 /// Represents data being sent between server and clients.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Packet {
     data: Vec<u8>,
 }

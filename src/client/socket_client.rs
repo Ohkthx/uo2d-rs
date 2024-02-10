@@ -1,4 +1,3 @@
-use std::sync::{Arc, Mutex};
 use std::thread;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -6,6 +5,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::cache::PacketCache;
 use crate::client::packet_processor::processor;
 use crate::cprintln;
 use crate::packet::{Action, Packet, Payload};
@@ -16,16 +16,16 @@ use super::gamestate::Gamestate;
 pub struct SocketClient {
     pub uuid: Uuid,
     sender: mpsc::Sender<Packet>,
-    received_packets: Arc<Mutex<Vec<Packet>>>,
+    packet_cache: PacketCache,
 }
 
 impl SocketClient {
     /// Create a new client instance.
     pub fn new(address: &str) -> Self {
         let (sender, mut receiver) = mpsc::channel::<Packet>(32);
-        let received_packets = Arc::new(Mutex::new(Vec::new()));
+        let packet_cache = PacketCache::new();
 
-        let received_packets_clone = Arc::clone(&received_packets);
+        let cache_clone = packet_cache.clone();
         let addr_clone = address.to_string();
 
         // Launch the asynchronous task.
@@ -55,7 +55,7 @@ impl SocketClient {
                             break;
                         }
                         let packet = Packet::from_bytes(&buf[..n]);
-                        received_packets_clone.lock().unwrap().push(packet);
+                        cache_clone.add(packet);
                     }
                 });
 
@@ -66,7 +66,7 @@ impl SocketClient {
         Self {
             uuid: Uuid::nil(),
             sender,
-            received_packets,
+            packet_cache,
         }
     }
 
@@ -79,8 +79,7 @@ impl SocketClient {
 
     /// Retrieve received packets from the cache.
     pub fn get_packets(&self) -> Vec<Packet> {
-        let mut received = self.received_packets.lock().unwrap();
-        std::mem::take(&mut *received)
+        self.packet_cache.get_all()
     }
 
     /// Processes a packet, returns an action and payload if one needs to be sent.

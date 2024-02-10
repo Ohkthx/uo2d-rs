@@ -29,8 +29,8 @@ pub struct Client {
 
 impl Client {
     /// Creates a new client, holding the socket.
-    fn new(socket: SocketClient) -> Client {
-        Client {
+    fn new(socket: SocketClient) -> Self {
+        Self {
             socket,
             gamestate: Gamestate::new(),
         }
@@ -49,7 +49,7 @@ impl Client {
     pub fn start(address: &str) -> Result<(), Box<dyn Error>> {
         // Create socket and tell the server we are joining.
         let socket = SocketClient::new(address);
-        let mut client = Client::new(socket);
+        let mut client = Self::new(socket);
         client.send(
             Action::ClientJoin,
             Payload::Movement(MovementPayload::new((
@@ -62,11 +62,7 @@ impl Client {
         while client.uuid() == Uuid::nil() {
             let packets = client.socket.get_packets();
             for packet in packets.into_iter() {
-                if let Some((action, payload)) =
-                    client.socket.process_packet(&mut client.gamestate, packet)
-                {
-                    client.send(action, payload);
-                }
+                client.socket.process_packet(&mut client.gamestate, packet);
             }
             std::thread::sleep(Duration::from_millis(16));
         }
@@ -176,6 +172,10 @@ impl Client {
                 {
                     self.send(action, payload);
                 }
+            }
+
+            if self.gamestate.kill {
+                break 'running;
             }
 
             thread::sleep(Duration::from_millis(16));

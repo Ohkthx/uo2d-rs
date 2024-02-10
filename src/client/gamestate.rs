@@ -15,6 +15,7 @@ pub struct Player {
 pub struct Gamestate {
     pub players: HashMap<Uuid, Player>,
     next_color: (u8, u8, u8),
+    pub kill: bool,
 }
 
 impl Gamestate {
@@ -23,11 +24,16 @@ impl Gamestate {
         Self {
             players: HashMap::new(),
             next_color: (0, 0, 0),
+            kill: false,
         }
     }
 
     /// Adds a new player to be tracked.
     pub fn add_player(&mut self, uuid: Uuid, position: (i32, i32)) {
+        if self.players.contains_key(&uuid) {
+            return;
+        }
+
         self.players.insert(
             uuid,
             Player {
