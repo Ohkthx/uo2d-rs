@@ -4,10 +4,11 @@ use std::thread::sleep;
 use std::time::Duration;
 
 pub use socket_server::SocketServer;
+use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::cache::PacketCache;
+use crate::cache::PacketCacheAsync;
 use crate::packet::PacketConfiguration;
 use crate::{sprintln, util::get_now};
 
@@ -48,7 +49,7 @@ impl Server {
         let (tx, rx) = mpsc::channel::<PacketConfiguration>(32);
 
         // Create socket and listen for connections.
-        let packet_cache = PacketCache::new();
+        let packet_cache = PacketCacheAsync::new(1);
         let addr_clone = address.to_string();
 
         let cache = packet_cache.clone();
@@ -58,8 +59,20 @@ impl Server {
             }
         });
 
-        let mut gamestate = Gamestate::new(tx, packet_cache);
-        gamestate.start();
+        let handle = std::thread::spawn(move || {
+            // Create a new Tokio runtime
+            let rt = Runtime::new().expect("Failed to create a runtime");
+
+            // Block on the async `start` function using the runtime
+            rt.block_on(async {
+                let mut gamestate = Gamestate::new(tx, packet_cache, (800, 800));
+                gamestate.start().await;
+            });
+        });
+
+        if handle.join().is_err() {
+            sprintln!("ERROR while joining the thread.");
+        }
 
         sleep(Duration::from_secs(1));
         Ok(())

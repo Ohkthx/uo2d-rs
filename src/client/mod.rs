@@ -4,8 +4,8 @@ use std::{error::Error, thread};
 use sdl2::event::Event;
 use sdl2::image::{self, InitFlag};
 use sdl2::keyboard::Keycode;
+use sdl2::mouse::MouseButton;
 use sdl2::pixels::Color;
-use sdl2::rect::Rect;
 use uuid::Uuid;
 
 use crate::cprintln;
@@ -17,7 +17,7 @@ mod gamestate;
 mod packet_processor;
 mod socket_client;
 
-use self::gamestate::Gamestate;
+use self::gamestate::{Gamestate, Player};
 use self::socket_client::SocketClient;
 
 const WINDOW_DIMENSIONS: (u32, u32) = (800, 800);
@@ -45,17 +45,23 @@ impl Client {
         self.socket.uuid
     }
 
+    fn player(&self) -> &Player {
+        self.gamestate.players.get(&self.uuid()).unwrap()
+    }
+
     /// Starts the client, this begins the remote listerning and graphics.
     pub fn start(address: &str) -> Result<(), Box<dyn Error>> {
         // Create socket and tell the server we are joining.
         let socket = SocketClient::new(address);
+        let start = (
+            WINDOW_DIMENSIONS.0 as i32 / 2,
+            WINDOW_DIMENSIONS.1 as i32 / 2,
+        );
+
         let mut client = Self::new(socket);
         client.send(
             Action::ClientJoin,
-            Payload::Movement(MovementPayload::new((
-                WINDOW_DIMENSIONS.0 as i32 / 2,
-                WINDOW_DIMENSIONS.1 as i32 / 2,
-            ))),
+            Payload::Movement(MovementPayload::new(32, start, (0.0, 0.0), 0.0)),
         );
 
         // Wait until we have authenticated.
@@ -69,7 +75,7 @@ impl Client {
 
         // Add the client as a player.
         cprintln!("Player UUID: {}", client.uuid());
-        client.gamestate.add_player(client.uuid(), (400, 400));
+        client.gamestate.upsert_player(client.uuid(), start, 32);
 
         // Run the SDL2 game loop on the main thread.
         client.gameloop()?;
@@ -89,7 +95,11 @@ impl Client {
         let _image_context = image::init(InitFlag::PNG).map_err(|e| e.to_string())?;
 
         let window = video_subsystem
-            .window("uo2d", WINDOW_DIMENSIONS.0, WINDOW_DIMENSIONS.1)
+            .window(
+                &format!("uo2d - {}", self.uuid()),
+                WINDOW_DIMENSIONS.0,
+                WINDOW_DIMENSIONS.1,
+            )
             .position_centered()
             .build()
             .map_err(|e| e.to_string())?;
@@ -99,17 +109,13 @@ impl Client {
             .build()
             .map_err(|e| e.to_string())?;
 
-        // Define the initial position and size of the square
-        let square_size = 50; // Size of the square
-        let mut square_pos = (
-            WINDOW_DIMENSIONS.0 as i32 / 2,
-            WINDOW_DIMENSIONS.1 as i32 / 2,
-        ); // Center of the window
-
         // Color management.
         let mut background = (0, 0, 0);
 
         let mut event_pump = sdl_context.event_pump().map_err(|e| e.to_string())?;
+        let mut target_pos: Option<(i32, i32)> = None; // Target position initialized as None
+        let move_speed = 5.0;
+
         'running: loop {
             for event in event_pump.poll_iter() {
                 match event {
@@ -118,36 +124,61 @@ impl Client {
                         keycode: Some(Keycode::Escape),
                         ..
                     } => break 'running,
+                    Event::MouseButtonDown {
+                        x, y, mouse_btn, ..
+                    } => {
+                        if mouse_btn == MouseButton::Left {
+                            target_pos = Some((x, y)); // Update target position on left mouse click
+                        }
+                    }
                     _ => {}
                 }
             }
 
-            let old_pos = square_pos;
             // Check the current state of the keyboard
+            let mut trajectory: (f32, f32) = (0.0, 0.0);
+
             let keyboard_state = event_pump.keyboard_state();
             if keyboard_state.is_scancode_pressed(sdl2::keyboard::Scancode::W) {
-                square_pos.1 -= 10; // Move up
+                trajectory.1 = -1.0; // Move up
             }
             if keyboard_state.is_scancode_pressed(sdl2::keyboard::Scancode::A) {
-                square_pos.0 -= 10; // Move left
+                trajectory.0 = -1.0; // Move left
             }
             if keyboard_state.is_scancode_pressed(sdl2::keyboard::Scancode::S) {
-                square_pos.1 += 10; // Move down
+                trajectory.1 = 1.0; // Move down
             }
             if keyboard_state.is_scancode_pressed(sdl2::keyboard::Scancode::D) {
-                square_pos.0 += 10; // Move right
+                trajectory.0 = 1.0; // Move right
             }
 
-            if old_pos != square_pos {
+            if trajectory != (0.0, 0.0) {
+                target_pos = None;
+            } else if let Some(target) = target_pos {
+                let player = self.player(); // Assuming this retrieves a mutable reference to the player
+                let (px, py) = (player.pos.0 as f32, player.pos.1 as f32);
+                let (tx, ty) = (target.0 as f32, target.1 as f32);
+
+                if (px - tx).abs() > move_speed || (py - ty).abs() > move_speed {
+                    // Calculate direction vector
+                    let dx = tx - px;
+                    let dy = ty - py;
+                    let mag = (dx.powi(2) + dy.powi(2)).sqrt();
+
+                    // Calculate and store trajectory vector as a unit vector
+                    trajectory = (dx / mag, dy / mag);
+                } else {
+                    target_pos = None; // Clear target position
+                    trajectory = (0.0, 0.0); // Clear trajectory
+                }
+            }
+
+            if trajectory != (0.0, 0.0) {
+                let p = self.player();
                 self.send(
                     Action::Movement,
-                    Payload::Movement(MovementPayload::new(old_pos)),
+                    Payload::Movement(MovementPayload::new(p.size, p.pos, trajectory, move_speed)),
                 );
-            }
-
-            // Update the position.
-            if let Some(player) = self.gamestate.players.get_mut(&self.uuid()) {
-                player.pos = square_pos;
             }
 
             // Game rendering and logic here
@@ -156,10 +187,8 @@ impl Client {
             canvas.clear();
 
             // Draw all players
-            for p in self.gamestate.players.values() {
-                let square = Rect::new(p.pos.0, p.pos.1, square_size, square_size);
-                canvas.set_draw_color(Color::RGB(p.color.0, p.color.1, p.color.2));
-                canvas.fill_rect(square).map_err(|e| e.to_string())?;
+            for player in self.gamestate.players.values() {
+                player.draw(&mut canvas);
             }
 
             canvas.present();

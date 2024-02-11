@@ -66,7 +66,7 @@ fn client_join(
     };
 
     cprintln!("{} has joined.", uuid);
-    gamestate.add_player(uuid, payload.position);
+    gamestate.upsert_player(uuid, payload.position, payload.size);
     None
 }
 
@@ -82,11 +82,6 @@ fn movement(gamestate: &mut Gamestate, uuid: Uuid, payload: Payload) -> Option<(
         _ => return None,
     };
 
-    if let Some(player) = gamestate.players.get_mut(&uuid) {
-        player.pos = payload.position;
-    } else {
-        gamestate.add_player(uuid, payload.position);
-    }
-
+    gamestate.upsert_player(uuid, payload.position, payload.size);
     None
 }

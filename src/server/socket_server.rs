@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
 use uuid::Uuid;
 
-use crate::cache::{ClientCache, PacketCache};
+use crate::cache::{ClientCache, PacketCacheAsync};
 use crate::packet::payloads::{MessagePayload, PingPayload};
 use crate::packet::{Action, Packet, PacketConfiguration, Payload};
 use crate::server::packet_processor::process_packet;
@@ -28,11 +28,11 @@ pub struct SocketServer {
     /// Current active clients.
     client_cache: ClientCache,
     /// Cached packets for the gamestate.
-    packet_cache: PacketCache,
+    packet_cache: PacketCacheAsync,
 }
 
 impl SocketServer {
-    fn new(packet_cache: PacketCache) -> Self {
+    fn new(packet_cache: PacketCacheAsync) -> Self {
         Self {
             client_cache: ClientCache::new(),
             packet_cache,
@@ -43,7 +43,7 @@ impl SocketServer {
     pub fn start(
         address: &str,
         receiver: Receiver<PacketConfiguration>,
-        cache: PacketCache,
+        cache: PacketCacheAsync,
     ) -> Result<(), Box<dyn Error>> {
         let addr_clone = address.to_string();
 
@@ -117,7 +117,7 @@ impl SocketServer {
                         Payload::Message(MessagePayload::new("Server is shutting down.")),
                     );
 
-                    self.packet_cache.add(packet.clone());
+                    self.packet_cache.add(packet.clone()).await;
                     self.broadcast(packet, None).await?;
                     sleep(Duration::from_secs(1)).await;
                     break;
@@ -145,7 +145,7 @@ impl SocketServer {
             let clients = self.client_cache.clone();
             let now = get_now();
 
-            for (_, client) in clients.lock().iter_mut() {
+            for (_, client) in clients.lock().await.iter_mut() {
                 if now - client.last_ping > MAX_HEARTBEAT_INTERVAL {
                     expired.insert(client.uuid);
                 } else {
@@ -156,7 +156,13 @@ impl SocketServer {
             // Remove the expired clients.
             for uuid in expired {
                 sprintln!("EXPIRED SESSION: {}", uuid);
-                clients.remove(&uuid);
+                clients.remove(&uuid).await;
+
+                let packet = Packet::new(Action::ClientLeave, uuid, Payload::Empty);
+                self.packet_cache.add(packet.clone()).await;
+                if let Err(why) = self.broadcast(packet, None).await {
+                    sprintln!("Unable to broadcast {} leaving: {}.", uuid, why);
+                }
             }
         }
 
@@ -173,7 +179,7 @@ impl SocketServer {
         // Spawn the async operation
         tokio::spawn(async move {
             // Lock and immediately drop to minimize lock holding time
-            if let Some(client) = clients.get(&uuid) {
+            if let Some(client) = clients.get(&uuid).await {
                 let _ = timeout(
                     Duration::from_secs(MAX_HEARTBEAT_INTERVAL),
                     client.tx.send(bytes),
@@ -211,12 +217,13 @@ impl SocketServer {
         // Get the clients to send to.
         let clients = {
             match filter {
-                None => cache.values(),
+                None => cache.values().await,
                 Some(uuids) if !uuids.is_empty() => cache
                     .values()
+                    .await
                     .into_iter()
                     .filter(|client| uuids.contains(&client.uuid))
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<Client>>(),
                 _ => Vec::new(),
             }
         };
@@ -254,7 +261,7 @@ impl SocketServer {
         // Assign UUID to the new client.
         let uuid = Uuid::new_v4();
         sprintln!("{} has joined.", uuid);
-        self.client_cache.add(Client::new(uuid, addr, ctx));
+        self.client_cache.add(Client::new(uuid, addr, ctx)).await;
 
         // Start packet handler.
         let mut buf = vec![0; 1024];
@@ -283,7 +290,7 @@ impl SocketServer {
                             }
                             PacketConfiguration::Broadcast(packet, _scope) => {
                                 // NOTE: Currently assuming GLOBAL scope for broadcast.
-                                let c: Vec<Uuid> = all_clients.keys();
+                                let c: Vec<Uuid> = all_clients.keys().await;
                                 end_session = packet.action() == Action::ClientLeave;
                                 if let Err(why) = Self::exec_broadcast(&all_clients, packet, Some(&c)).await {
                                     sprintln!("ERROR BROADCAST {}", why);
@@ -291,7 +298,7 @@ impl SocketServer {
                             }
                             PacketConfiguration::SuccessBroadcast(to_client, to_broadcast, _scope) => {
                                 // NOTE: Currently assuming GLOBAL scope for broadcast.
-                                let c: Vec<Uuid> = all_clients.keys().into_iter().filter(|u| *u != uuid).collect();
+                                let c: Vec<Uuid> = all_clients.keys().await.into_iter().filter(|u| *u != uuid).collect();
                                 if let Err(why) = socket.write_all(&to_client.to_bytes()).await {
                                     sprintln!("ERROR WRITING {}", why);
                                 }
@@ -318,7 +325,7 @@ impl SocketServer {
                         if let Some(msg) = handler_message {
                             let packet: Packet = Packet::from_bytes(&msg) ;
                             if let Payload::Ping(ping) = packet.payload() {
-                                if let Some(client) = all_clients.lock().get_mut(&packet.uuid()) {
+                                if let Some(client) = all_clients.lock().await.get_mut(&packet.uuid()) {
                                     if client.ping_id == ping.uuid {
                                         client.last_ping = get_now();
                                     }
@@ -336,6 +343,6 @@ impl SocketServer {
         }
 
         sprintln!("{} has left.", uuid);
-        self.client_cache.remove(&uuid);
+        self.client_cache.remove(&uuid).await;
     }
 }

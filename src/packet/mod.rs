@@ -1,9 +1,12 @@
 mod packet_util;
 pub mod payloads;
 
+use std::collections::HashSet;
+
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use self::payloads::*;
 pub use packet_util::*;
@@ -11,7 +14,7 @@ pub use packet_util::*;
 pub const PACKET_VERSION: u8 = 0x01;
 
 pub enum BroadcastScope {
-    Local,
+    Local(HashSet<Uuid>),
     Global,
 }
 

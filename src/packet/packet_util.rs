@@ -55,6 +55,11 @@ impl Packet {
         }
     }
 
+    /// Obtains the bytes for the Action and UUID of the packet.
+    pub fn signature(&self) -> &[u8] {
+        &self.data[1..19]
+    }
+
     /// Sets the version in the packet.
     pub fn set_version(mut self, version: u8) -> Self {
         self.data[0] = version;

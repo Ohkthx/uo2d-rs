@@ -32,12 +32,25 @@ impl PingPayload {
 /// Movement payload, used to send current position for an entity.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MovementPayload {
+    pub size: u16,
     pub position: (i32, i32),
+    pub trajectory: (f32, f32),
+    pub speed: f32,
 }
 
 impl MovementPayload {
     /// Create a new position payload.
-    pub fn new(position: (i32, i32)) -> MovementPayload {
-        MovementPayload { position }
+    pub fn new(
+        size: u16,
+        position: (i32, i32),
+        trajectory: (f32, f32),
+        speed: f32,
+    ) -> MovementPayload {
+        MovementPayload {
+            size,
+            position,
+            trajectory,
+            speed,
+        }
     }
 }

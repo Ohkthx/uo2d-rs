@@ -5,7 +5,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::cache::PacketCache;
+use crate::cache::PacketCacheSync;
 use crate::client::packet_processor::processor;
 use crate::cprintln;
 use crate::packet::{Action, Packet, Payload};
@@ -16,14 +16,14 @@ use super::gamestate::Gamestate;
 pub struct SocketClient {
     pub uuid: Uuid,
     sender: mpsc::Sender<Packet>,
-    packet_cache: PacketCache,
+    packet_cache: PacketCacheSync,
 }
 
 impl SocketClient {
     /// Create a new client instance.
     pub fn new(address: &str) -> Self {
         let (sender, mut receiver) = mpsc::channel::<Packet>(32);
-        let packet_cache = PacketCache::new();
+        let packet_cache = PacketCacheSync::new(usize::MAX);
 
         let cache_clone = packet_cache.clone();
         let addr_clone = address.to_string();
