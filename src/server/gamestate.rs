@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::{thread::sleep, time::Duration};
+use std::thread::sleep;
 
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
@@ -8,12 +8,15 @@ use crate::entity::Entity;
 use crate::packet::payloads::MovementPayload;
 use crate::packet::{Action, BroadcastScope, Packet, PacketConfiguration, Payload};
 use crate::spatial_hash::SpatialHash;
+use crate::sprintln;
+use crate::timer::{TimerData, TimerManager};
 
 use super::PacketCacheAsync;
 
 /// Ensures the integrity of the game.
 pub struct Gamestate {
     sender: Sender<PacketConfiguration>,
+    timers: TimerManager,
     cache: PacketCacheAsync,
     spatial: SpatialHash,
     entities: HashMap<Uuid, Entity>,
@@ -29,6 +32,7 @@ impl Gamestate {
     ) -> Self {
         Self {
             sender: tx,
+            timers: TimerManager::new(),
             cache,
             entities: HashMap::new(),
             spatial: SpatialHash::new(32),
@@ -43,7 +47,15 @@ impl Gamestate {
 
     /// Starts the servers gameloop.
     pub async fn start(&mut self) {
+        // Create a test timer of 100 ticks and 5 seconds.
+        self.timers.add_timer_tick(1000, TimerData::Empty);
+        self.timers.add_timer_sec(5.0, TimerData::Empty, true);
+
         'running: loop {
+            for timer in self.timers.update() {
+                sprintln!("Expired: {:?}", timer);
+            }
+
             self.update();
 
             // Process the data from the server if there is any.
@@ -63,7 +75,7 @@ impl Gamestate {
                     self.movement(packet.uuid(), movement);
                 }
             }
-            sleep(Duration::from_millis(8));
+            sleep(self.timers.server_tick_time());
         }
     }
 
@@ -93,7 +105,7 @@ impl Gamestate {
         // Perform move.
         if let Some(entity) = self.entities.get_mut(&uuid) {
             query.destination = pos;
-            entity.move_entity(&mut self.spatial, &query, movement.size);
+            entity.move_entity(&mut self.spatial, &query);
             if query.has_moved() {
                 let _ = self.sender.try_send(PacketConfiguration::Broadcast(
                     Packet::new(
@@ -101,7 +113,7 @@ impl Gamestate {
                         uuid,
                         Payload::Movement(MovementPayload::new(
                             movement.size,
-                            (entity.rect().x(), entity.rect().y()),
+                            entity.object().position(),
                             entity.last_trajectory,
                             movement.speed,
                         )),

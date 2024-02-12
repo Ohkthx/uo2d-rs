@@ -1,9 +1,11 @@
 mod cache;
 mod client;
 mod entity;
+mod object;
 mod packet;
 mod server;
 mod spatial_hash;
+mod timer;
 mod util;
 
 use std::env;

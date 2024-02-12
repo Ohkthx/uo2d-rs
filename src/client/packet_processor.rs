@@ -66,13 +66,13 @@ fn client_join(
     };
 
     cprintln!("{} has joined.", uuid);
-    gamestate.upsert_player(uuid, payload.position, payload.size);
+    gamestate.upsert_entity(uuid, payload.position, payload.size);
     None
 }
 
 fn client_leave(gamestate: &mut Gamestate, uuid: Uuid) -> Option<(Action, Payload)> {
     cprintln!("{} has left.", uuid);
-    gamestate.remove_player(uuid);
+    gamestate.remove_entity(uuid);
     None
 }
 
@@ -82,6 +82,6 @@ fn movement(gamestate: &mut Gamestate, uuid: Uuid, payload: Payload) -> Option<(
         _ => return None,
     };
 
-    gamestate.upsert_player(uuid, payload.position, payload.size);
+    gamestate.upsert_entity(uuid, payload.position, payload.size);
     None
 }
