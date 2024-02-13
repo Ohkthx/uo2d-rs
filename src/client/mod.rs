@@ -133,8 +133,12 @@ impl Client {
         let mut bg = Rect::new(center_x, center_y, img_width, img_height);
 
         let mut event_pump = sdl_context.event_pump().map_err(|e| e.to_string())?;
-        let mut target_pos: Option<(i32, i32)> = None;
         let move_speed = 5.0;
+
+        let mut left_mouse_down = false;
+        let mut right_mouse_down = false;
+        let mut target_pos: Option<(i32, i32)> = None;
+        let mut last_mouse_pos: Option<(i32, i32)> = None;
 
         'running: loop {
             for timer in self.gamestate.timers.update() {
@@ -155,16 +159,45 @@ impl Client {
                         x, y, mouse_btn, ..
                     } => {
                         if mouse_btn == MouseButton::Left {
-                            let (dx, dy) = (x - win_x_center, y - win_y_center);
-                            target_pos = Some((player.position.0 + dx, player.position.1 + dy));
+                            left_mouse_down = true;
+                            last_mouse_pos = Some((x, y));
                         }
                         if mouse_btn == MouseButton::Right {
-                            let (dx, dy) = (x - win_x_center, y - win_y_center);
-                            let mut focus = Some((player.position.0 + dx, player.position.1 + dy));
-                            projectile = calc_trajectory(player.position, move_speed, &mut focus);
+                            right_mouse_down = true;
+                            last_mouse_pos = Some((x, y));
+                        }
+                    }
+                    Event::MouseButtonUp { mouse_btn, .. } => {
+                        if mouse_btn == MouseButton::Left {
+                            left_mouse_down = false;
+                        }
+                        if mouse_btn == MouseButton::Right {
+                            right_mouse_down = false;
+                        }
+                    }
+                    Event::MouseMotion { x, y, .. } => {
+                        if left_mouse_down || right_mouse_down {
+                            last_mouse_pos = Some((x, y));
                         }
                     }
                     _ => {}
+                }
+            }
+
+            // Update the movement towards the mouse pointer.
+            if left_mouse_down {
+                if let Some((x, y)) = last_mouse_pos {
+                    let (dx, dy) = (x - win_x_center, y - win_y_center);
+                    target_pos = Some((player.position.0 + dx, player.position.1 + dy));
+                }
+            }
+
+            // Update the projectile towards the mouse pointer.
+            if right_mouse_down {
+                if let Some((x, y)) = last_mouse_pos {
+                    let (dx, dy) = (x - win_x_center, y - win_y_center);
+                    let mut focus = Some((player.position.0 + dx, player.position.1 + dy));
+                    projectile = calc_trajectory(player.position, move_speed, &mut focus);
                 }
             }
 

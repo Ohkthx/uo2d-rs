@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as SyncMutex};
 
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
@@ -94,18 +95,24 @@ impl PacketCacheAsync {
 
 /// Holds all clients that are current connected.
 #[derive(Clone)]
-pub struct ClientCache(Arc<AsyncMutex<HashMap<Uuid, Client>>>);
+pub struct ClientCache {
+    clients: Arc<AsyncMutex<HashMap<Uuid, Client>>>,
+    addr: Arc<AsyncMutex<HashMap<SocketAddr, Uuid>>>,
+}
 
 impl ClientCache {
     /// Creates a new ClientCache with an empty client map.
     pub fn new() -> Self {
-        Self(Arc::new(AsyncMutex::new(HashMap::new())))
+        Self {
+            clients: Arc::new(AsyncMutex::new(HashMap::new())),
+            addr: Arc::new(AsyncMutex::new(HashMap::new())),
+        }
     }
 
     /// Exposes the lock to the caller, allowing direct mutable access to the cache.
     /// The caller is responsible for handling the lock correctly.
     pub async fn lock(&self) -> MutexGuard<HashMap<Uuid, Client>> {
-        self.0.lock().await
+        self.clients.lock().await
     }
 
     /// Retrieve a client from the cache.
@@ -113,8 +120,14 @@ impl ClientCache {
         self.lock().await.get(uuid).cloned()
     }
 
+    /// Retrieve a UUID attached to an address from the cache.
+    pub async fn get_uuid(&self, addr: &SocketAddr) -> Option<Uuid> {
+        self.addr.lock().await.get(addr).cloned()
+    }
+
     /// Add a new client to the cache.
     pub async fn add(&self, client: Client) {
+        self.addr.lock().await.insert(client.addr, client.uuid);
         self.lock().await.insert(client.uuid, client);
     }
 
@@ -128,6 +141,10 @@ impl ClientCache {
     }
 
     pub async fn remove(&self, uuid: &Uuid) -> Option<Client> {
+        let client = self.get(uuid).await;
+        if let Some(client) = client {
+            self.addr.lock().await.remove(&client.addr);
+        }
         self.lock().await.remove(uuid)
     }
 }

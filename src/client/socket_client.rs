@@ -1,8 +1,8 @@
+use std::sync::Arc;
 use std::thread;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 use crate::cache::PacketCacheSync;
@@ -32,33 +32,45 @@ impl SocketClient {
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                // Connect to the server.
-                let stream = TcpStream::connect(addr_clone).await.unwrap();
-                let (mut reader, mut writer) = stream.into_split();
+                let local_addr = "0.0.0.0:0";
+                let socket = Arc::new(Mutex::new(UdpSocket::bind(local_addr).await.unwrap()));
+                socket.lock().await.connect(addr_clone).await.unwrap();
 
                 // Handle sending packets to the server.
+                let send_socket = Arc::clone(&socket);
+
                 let send_task = tokio::spawn(async move {
                     while let Some(packet) = receiver.recv().await {
                         // Convert Packet to bytes and send.
-                        if let Err(why) = writer.write_all(&packet.to_bytes()).await {
-                            cprintln!("ERROR WRITING {}", why);
+                        let packet_bytes = packet.to_bytes();
+                        if let Err(why) = send_socket.lock().await.send(&packet_bytes).await {
+                            cprintln!("ERROR SENDING: {}", why);
                         }
                     }
                 });
 
                 // Handle receiving packets from the server.
+                let recv_socket = Arc::clone(&socket);
                 let recv_task = tokio::spawn(async move {
                     let mut buf = [0u8; 1024];
                     loop {
-                        let n = reader.read(&mut buf).await.unwrap();
-                        if n == 0 {
-                            break;
+                        // Temporarily store the result of trying to receive data
+                        let recv_result = {
+                            let socket = recv_socket.lock().await; // Lock is acquired and immediately dropped after the block
+                            socket.try_recv(&mut buf)
+                        };
+
+                        if let Ok(n) = recv_result {
+                            if n == 0 {
+                                break;
+                            }
+
+                            cache_clone.add(Packet::from_bytes(&buf[..n]));
                         }
-                        let packet = Packet::from_bytes(&buf[..n]);
-                        cache_clone.add(packet);
                     }
                 });
 
+                // Wait for both tasks to complete
                 tokio::try_join!(send_task, recv_task).unwrap();
             });
         });

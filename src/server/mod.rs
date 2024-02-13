@@ -22,19 +22,17 @@ pub mod socket_server;
 #[derive(Clone)]
 pub(crate) struct Client {
     pub(crate) uuid: Uuid,
-    _addr: SocketAddr,
-    tx: mpsc::Sender<Vec<u8>>,
+    pub addr: SocketAddr,
     ping_id: Uuid,
     last_ping: u64,
 }
 
 impl Client {
     /// Create a new instance of the client to be tracked.
-    pub fn new(uuid: Uuid, _addr: SocketAddr, tx: mpsc::Sender<Vec<u8>>) -> Client {
+    pub fn new(uuid: Uuid, addr: SocketAddr) -> Client {
         Client {
             uuid,
-            _addr,
-            tx,
+            addr,
             ping_id: Uuid::nil(),
             last_ping: get_now(),
         }
