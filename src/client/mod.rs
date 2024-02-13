@@ -12,7 +12,7 @@ use sdl2::render::TextureQuery;
 use uuid::Uuid;
 
 use crate::cprintln;
-use crate::object::Position;
+use crate::object::{Object, Position};
 use crate::packet::payloads::MovementPayload;
 use crate::packet::{Action, Payload};
 
@@ -63,10 +63,7 @@ impl Client {
         );
 
         let mut client = Self::new(socket);
-        client.send(
-            Action::ClientJoin,
-            Payload::Movement(MovementPayload::new((32, 32), start, (0.0, 0.0), 0.0)),
-        );
+        client.send(Action::ClientJoin, Payload::Empty);
 
         // Wait until we have authenticated.
         while client.uuid() == Uuid::nil() {
@@ -128,14 +125,12 @@ impl Client {
 
         // Get window size
         let (win_width, win_height) = canvas.window().size();
+        let (win_x_center, win_y_center) = (win_width as i32 / 2, win_height as i32 / 2);
 
         // Calculate position to center the image
         let center_x = (win_width as i32 - img_width as i32) / 2;
         let center_y = (win_height as i32 - img_height as i32) / 2;
         let mut bg = Rect::new(center_x, center_y, img_width, img_height);
-
-        // Color management.
-        // let mut background = (0, 0, 0);
 
         let mut event_pump = sdl_context.event_pump().map_err(|e| e.to_string())?;
         let mut target_pos: Option<(i32, i32)> = None;
@@ -145,6 +140,9 @@ impl Client {
             for timer in self.gamestate.timers.update() {
                 cprintln!("Expired: {:?}", timer);
             }
+
+            let player = self.player();
+            let mut projectile: (f32, f32) = (0.0, 0.0);
 
             for event in event_pump.poll_iter() {
                 match event {
@@ -157,7 +155,13 @@ impl Client {
                         x, y, mouse_btn, ..
                     } => {
                         if mouse_btn == MouseButton::Left {
-                            target_pos = Some((x, y)); // Update target position on left mouse click
+                            let (dx, dy) = (x - win_x_center, y - win_y_center);
+                            target_pos = Some((player.position.0 + dx, player.position.1 + dy));
+                        }
+                        if mouse_btn == MouseButton::Right {
+                            let (dx, dy) = (x - win_x_center, y - win_y_center);
+                            let mut focus = Some((player.position.0 + dx, player.position.1 + dy));
+                            projectile = calc_trajectory(player.position, move_speed, &mut focus);
                         }
                     }
                     _ => {}
@@ -183,23 +187,8 @@ impl Client {
 
             if trajectory != (0.0, 0.0) {
                 target_pos = None;
-            } else if let Some(target) = target_pos {
-                let player = self.player(); // Assuming this retrieves a mutable reference to the player
-                let (px, py) = (player.position.0 as f32, player.position.1 as f32);
-                let (tx, ty) = (target.0 as f32, target.1 as f32);
-
-                if (px - tx).abs() > move_speed || (py - ty).abs() > move_speed {
-                    // Calculate direction vector
-                    let dx = tx - px;
-                    let dy = ty - py;
-                    let mag = (dx.powi(2) + dy.powi(2)).sqrt();
-
-                    // Calculate and store trajectory vector as a unit vector
-                    trajectory = (dx / mag, dy / mag);
-                } else {
-                    target_pos = None; // Clear target position
-                    trajectory = (0.0, 0.0); // Clear trajectory
-                }
+            } else {
+                trajectory = calc_trajectory(player.position, move_speed, &mut target_pos);
             }
 
             // Produces a packet that we have moved to send to server.
@@ -213,20 +202,32 @@ impl Client {
                 );
             }
 
+            if projectile != (0.0, 0.0) {
+                let (x, y, z) = player.position;
+                let (w, h) = player.size;
+                let area = Object::new(x, y, z, w, h);
+                self.send(
+                    Action::Projectile,
+                    Payload::Movement(MovementPayload::new(
+                        (16, 16),
+                        area.place_outside(projectile, (16, 16), z),
+                        projectile,
+                        move_speed,
+                    )),
+                );
+            }
+
             canvas.clear();
             canvas.set_draw_color(Color::BLACK);
 
             // Renders the background and gamestate entities.
-            if let Some(player) = self.gamestate.get_entity(&self.uuid()) {
-                let offset = player.center_offset(WINDOW_DIMENSIONS);
+            // Move the background / map.
+            let offset = player.center_offset(WINDOW_DIMENSIONS);
+            bg.set_x(center_x - offset.0);
+            bg.set_y(center_y - offset.1);
+            canvas.copy(&background_texture, None, Some(bg))?;
 
-                // Move the background / map.
-                bg.set_x(center_x - offset.0);
-                bg.set_y(center_y - offset.1);
-                canvas.copy(&background_texture, None, Some(bg))?;
-
-                self.gamestate.draw(&mut canvas, offset);
-            }
+            self.gamestate.draw(&mut canvas, offset);
 
             canvas.present();
 
@@ -248,5 +249,31 @@ impl Client {
         }
 
         Ok(())
+    }
+}
+
+fn calc_trajectory(
+    start: Position,
+    move_speed: f32,
+    target: &mut Option<(i32, i32)>,
+) -> (f32, f32) {
+    if let Some(tar) = target {
+        let (px, py) = (start.0 as f32, start.1 as f32);
+        let (tx, ty) = (tar.0 as f32, tar.1 as f32);
+
+        if (px - tx).abs() > move_speed || (py - ty).abs() > move_speed {
+            // Calculate direction vector.
+            let dx = tx - px;
+            let dy = ty - py;
+            let mag = (dx.powi(2) + dy.powi(2)).sqrt();
+
+            // Calculate and store trajectory vector.
+            (dx / mag, dy / mag)
+        } else {
+            *target = None;
+            (0.0, 0.0)
+        }
+    } else {
+        (0.0, 0.0)
     }
 }

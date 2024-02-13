@@ -16,27 +16,29 @@ pub(crate) async fn process_packet(
     packet_cache: &PacketCacheAsync,
     tx: &mut mpsc::Sender<Vec<u8>>,
     uuid: Uuid,
-    packet: Packet,
+    mut packet: Packet,
 ) -> PacketConfiguration {
     let _puuid = packet.uuid();
+    packet = packet.set_uuid(uuid); // Not needed, preventing future spoofing.
     let payload = packet.payload();
     match packet.action() {
         Action::Ping => ping(tx, uuid, payload).await,
         Action::Message => message(uuid, payload),
-        Action::ClientJoin => client_join(packet_cache, uuid, payload).await,
+        Action::ClientJoin => client_join(packet_cache, uuid).await,
         Action::ClientLeave => client_leave(packet_cache, uuid).await,
         Action::Movement => movement(packet_cache, uuid, payload).await,
+        Action::Projectile => projectile(packet_cache, payload).await,
         _ => PacketConfiguration::Empty,
     }
 }
 
 async fn ping(tx: &mut mpsc::Sender<Vec<u8>>, uuid: Uuid, payload: Payload) -> PacketConfiguration {
     let payload = match payload {
-        Payload::Ping(data) => data,
+        Payload::Uuid(data) => data,
         _ => return PacketConfiguration::Empty,
     };
 
-    let packet = Packet::new(Action::Ping, uuid, Payload::Ping(payload));
+    let packet = Packet::new(Action::Ping, uuid, Payload::Uuid(payload));
     fwd_packet(tx, packet).await;
     PacketConfiguration::Empty
 }
@@ -51,20 +53,11 @@ fn message(uuid: Uuid, payload: Payload) -> PacketConfiguration {
     PacketConfiguration::Broadcast(packet, BroadcastScope::Global)
 }
 
-async fn client_join(
-    packet_cache: &PacketCacheAsync,
-    uuid: Uuid,
-    payload: Payload,
-) -> PacketConfiguration {
-    let payload = match payload {
-        Payload::Movement(data) => data,
-        _ => return PacketConfiguration::Empty,
-    };
-
-    let to_client = Packet::new(Action::Success, uuid, Payload::Empty);
-    let to_broadcast = Packet::new(Action::ClientJoin, uuid, Payload::Movement(payload));
-    packet_cache.add(to_broadcast.clone()).await;
-    PacketConfiguration::SuccessBroadcast(to_client, to_broadcast, BroadcastScope::Global)
+async fn client_join(packet_cache: &PacketCacheAsync, uuid: Uuid) -> PacketConfiguration {
+    packet_cache
+        .add(Packet::new(Action::ClientJoin, uuid, Payload::Empty))
+        .await;
+    PacketConfiguration::Empty
 }
 
 async fn client_leave(packet_cache: &PacketCacheAsync, uuid: Uuid) -> PacketConfiguration {
@@ -84,6 +77,22 @@ async fn movement(
     };
 
     let packet = Packet::new(Action::Movement, uuid, Payload::Movement(payload));
+    packet_cache.add(packet).await;
+    PacketConfiguration::Empty
+}
+
+async fn projectile(packet_cache: &PacketCacheAsync, payload: Payload) -> PacketConfiguration {
+    let payload = match payload {
+        Payload::Movement(data) => data,
+        _ => return PacketConfiguration::Empty,
+    };
+
+    let packet = Packet::new(
+        Action::Projectile,
+        Uuid::new_v4(),
+        Payload::Movement(payload),
+    );
+
     packet_cache.add(packet).await;
     PacketConfiguration::Empty
 }

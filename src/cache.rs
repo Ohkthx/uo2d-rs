@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as SyncMutex};
 
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
@@ -123,7 +123,7 @@ impl ClientCache {
         self.lock().await.values().cloned().collect()
     }
 
-    pub async fn keys(&self) -> Vec<Uuid> {
+    pub async fn keys(&self) -> HashSet<Uuid> {
         self.lock().await.keys().cloned().collect()
     }
 

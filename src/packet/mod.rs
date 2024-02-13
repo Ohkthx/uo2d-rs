@@ -13,12 +13,14 @@ pub use packet_util::*;
 
 pub const PACKET_VERSION: u8 = 0x01;
 
+#[derive(Clone)]
 pub enum BroadcastScope {
     Local(HashSet<Uuid>),
     Global,
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub enum PacketConfiguration {
     Empty,
     Single(Packet),
@@ -37,6 +39,8 @@ pub enum Action {
     ClientLeave,
     Message,
     Movement,
+    Projectile,
+    EntityDelete,
 }
 
 impl Action {
@@ -55,11 +59,11 @@ impl Action {
 }
 
 /// Payloads that can be sent inside a packet.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Payload {
     Empty,
     Invalid,
-    Ping(PingPayload),
+    Uuid(UuidPayload),
     Message(MessagePayload),
     Movement(MovementPayload),
 }

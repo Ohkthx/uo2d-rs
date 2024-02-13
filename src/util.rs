@@ -33,17 +33,17 @@ pub fn get_now() -> u64 {
 /// Taste the rainbow.
 pub fn exec_rainbow((r, g, b): (u8, u8, u8), step: u8) -> (u8, u8, u8) {
     if r == 255 && g < 255 && b == 0 {
-        return (255, (g + step).min(255), 0);
+        return (255, g.saturating_add(step), 0);
     } else if g == 255 && r > 0 && b == 0 {
-        return ((r - step).max(0), 255, 0);
+        return (r.saturating_sub(step), 255, 0);
     } else if g == 255 && b < 255 {
-        return (0, 255, (b + step).min(255));
+        return (0, 255, b.saturating_add(step));
     } else if b == 255 && g > 0 {
-        return (0, (g - step).max(0), 255);
+        return (0, g.saturating_sub(step), 255);
     } else if b == 255 && r < 255 {
-        return ((r + step).min(255), 0, 255);
+        return (r.saturating_add(step), 0, 255);
     } else if r == 255 && b > 0 {
-        return (255, 0, (b - step).max(0));
+        return (255, 0, b.saturating_sub(step));
     } else if r == 255 && g == 0 && b == 0 {
         return (255, step.min(255), 0);
     }

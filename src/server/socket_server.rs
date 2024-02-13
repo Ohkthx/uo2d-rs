@@ -13,8 +13,8 @@ use tokio::time::{interval, sleep, timeout};
 use uuid::Uuid;
 
 use crate::cache::{ClientCache, PacketCacheAsync};
-use crate::packet::payloads::{MessagePayload, PingPayload};
-use crate::packet::{Action, Packet, PacketConfiguration, Payload};
+use crate::packet::payloads::{MessagePayload, UuidPayload};
+use crate::packet::{Action, BroadcastScope, Packet, PacketConfiguration, Payload};
 use crate::server::packet_processor::process_packet;
 use crate::server::Client;
 use crate::sprintln;
@@ -98,9 +98,22 @@ impl SocketServer {
                 packet = gs_rx.recv() => {
                     if let Some(config) = packet {
                         let response = match config {
+                            PacketConfiguration::Empty => Ok(()),
                             PacketConfiguration::Single(packet) => self.send_packet(packet.uuid(), packet).await,
                             PacketConfiguration::Broadcast(packet, _scope) => self.broadcast(packet, None).await,
-                            _ => Ok(())
+                            PacketConfiguration::SuccessBroadcast(to_client, to_all, scope) => {
+                                if let Err(why) = self.send_packet(to_client.uuid(), to_client).await {
+                                    sprintln!("ERROR WRITING {}", why);
+                                }
+
+                                let clients: HashSet<Uuid> = match scope {
+                                    BroadcastScope::Local(uuids) => uuids,
+                                    BroadcastScope::Global => {
+                                        self.client_cache.keys().await.into_iter().filter(|u| *u != to_all.uuid()).collect()
+                                    }
+                                };
+                                self.broadcast(to_all, Some(clients)).await
+                            },
                         };
 
                         if let Err(why) = response {
@@ -136,7 +149,7 @@ impl SocketServer {
         let ping_packet = Packet::new(
             Action::Ping,
             Uuid::new_v4(),
-            Payload::Ping(PingPayload::new(ping_id)),
+            Payload::Uuid(UuidPayload::new(ping_id)),
         );
 
         // Update and clean the clients.
@@ -198,7 +211,7 @@ impl SocketServer {
     pub async fn broadcast(
         &self,
         packet: Packet,
-        filter: Option<&[Uuid]>,
+        filter: Option<HashSet<Uuid>>,
     ) -> Result<(), Box<dyn Error>> {
         Self::exec_broadcast(&self.client_cache, packet, filter).await
     }
@@ -210,7 +223,7 @@ impl SocketServer {
     async fn exec_broadcast(
         cache: &ClientCache,
         packet: Packet,
-        filter: Option<&[Uuid]>,
+        filter: Option<HashSet<Uuid>>,
     ) -> Result<(), Box<dyn Error>> {
         let packet_bytes = packet.to_bytes();
 
@@ -290,19 +303,25 @@ impl SocketServer {
                             }
                             PacketConfiguration::Broadcast(packet, _scope) => {
                                 // NOTE: Currently assuming GLOBAL scope for broadcast.
-                                let c: Vec<Uuid> = all_clients.keys().await;
+                                let c: HashSet<Uuid> = all_clients.keys().await;
                                 end_session = packet.action() == Action::ClientLeave;
-                                if let Err(why) = Self::exec_broadcast(&all_clients, packet, Some(&c)).await {
+                                if let Err(why) = Self::exec_broadcast(&all_clients, packet, Some(c)).await {
                                     sprintln!("ERROR BROADCAST {}", why);
                                 }
                             }
-                            PacketConfiguration::SuccessBroadcast(to_client, to_broadcast, _scope) => {
+                            PacketConfiguration::SuccessBroadcast(to_client, to_broadcast, scope) => {
                                 // NOTE: Currently assuming GLOBAL scope for broadcast.
-                                let c: Vec<Uuid> = all_clients.keys().await.into_iter().filter(|u| *u != uuid).collect();
                                 if let Err(why) = socket.write_all(&to_client.to_bytes()).await {
                                     sprintln!("ERROR WRITING {}", why);
                                 }
-                                if let Err(why) = Self::exec_broadcast(&all_clients, to_broadcast, Some(&c)).await {
+
+                                let clients: HashSet<Uuid> = match scope {
+                                    BroadcastScope::Local(uuids) => uuids,
+                                    BroadcastScope::Global => {
+                                        all_clients.keys().await.into_iter().filter(|u| *u != uuid).collect()
+                                    }
+                                };
+                                if let Err(why) = Self::exec_broadcast(&all_clients, to_broadcast, Some(clients)).await {
                                     sprintln!("ERROR BROADCAST {}", why);
                                 }
                             }
@@ -324,7 +343,7 @@ impl SocketServer {
                     handler_message = hrx.recv() => {
                         if let Some(msg) = handler_message {
                             let packet: Packet = Packet::from_bytes(&msg) ;
-                            if let Payload::Ping(ping) = packet.payload() {
+                            if let Payload::Uuid(ping) = packet.payload() {
                                 if let Some(client) = all_clients.lock().await.get_mut(&packet.uuid()) {
                                     if client.ping_id == ping.uuid {
                                         client.last_ping = get_now();

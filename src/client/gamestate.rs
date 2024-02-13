@@ -151,12 +151,12 @@ impl Gamestate {
             .insert(uuid, entity);
     }
 
-    pub fn remove_entity(&mut self, uuid: Uuid) {
+    pub fn remove_entity(&mut self, uuid: &Uuid) {
         // First, find the layer the entity is in using the locations map and remove the entry.
-        if let Some(layer) = self.locations.remove(&uuid) {
+        if let Some(layer) = self.locations.remove(uuid) {
             // Then, access the sub-map for the layer and attempt to remove the entity by its UUID.
             if let Some(entities) = self.entities.get_mut(&layer) {
-                entities.remove(&uuid);
+                entities.remove(uuid);
 
                 // Remove the layer if it is empty.
                 if entities.is_empty() {

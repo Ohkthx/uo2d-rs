@@ -27,9 +27,17 @@ impl MoveQuery {
     }
 }
 
+#[derive(PartialEq, Clone)]
+pub enum EntityType {
+    Creature,
+    Projectile,
+}
+
 /// Server side representation of an entity to check movement.
+#[derive(Clone)]
 pub struct Entity {
     pub uuid: Uuid,
+    pub entity_type: EntityType,
     obj: Object,
     pub faced_left: bool,
     pub last_trajectory: (f32, f32),
@@ -38,10 +46,16 @@ pub struct Entity {
 
 impl Entity {
     /// Creates a new entity including the rectangle for collision checkings.
-    pub fn new(uuid: Uuid, position: (i32, i32, i8), size: (u16, u16)) -> Self {
+    pub fn new(
+        uuid: Uuid,
+        position: (i32, i32, i8),
+        size: (u16, u16),
+        entity_type: EntityType,
+    ) -> Self {
         let (x, y, z) = position;
         Self {
             uuid,
+            entity_type,
             obj: Object::new(x, y, z, size.0, size.1),
             faced_left: false,
             last_trajectory: (0.0, 0.0),
@@ -64,28 +78,31 @@ impl Entity {
         &self,
         spatial_area: &mut SpatialHash,
         boundary: (u32, u32),
-        _source: Position,
         trajectory: (f32, f32),
         speed: f32,
     ) -> MoveQuery {
         let (tx, ty) = trajectory;
+        let (bx, by) = boundary;
+        let (x, y) = self.obj.top_left();
+        let (w, h) = self.obj.size();
 
         // Apply movement deltas within bounds.
-        let dx = (self.obj.x() as f32 + (tx * speed))
-            .max(0.0)
-            .min((boundary.0 - self.obj.width_u32()) as f32)
-            .floor() as i32;
-        let dy = (self.obj.y() as f32 + (ty * speed))
-            .max(0.0)
-            .min((boundary.1 - self.obj.height_u32()) as f32)
-            .floor() as i32;
+        let mut touch_boundary: bool = false;
+        let (touched, dx) = Self::calc_coord_change(x, tx, w, bx, speed);
+        touch_boundary |= touched;
+        let (touched, dy) = Self::calc_coord_change(y, ty, h, by, speed);
+        touch_boundary |= touched;
 
         // Builds the query.
         let mut query = MoveQuery {
             uuid: self.uuid,
-            source: (self.obj.x(), self.obj.y(), self.obj.z()),
-            destination: (dx, dy, self.obj.z()),
-            trajectory: (tx, ty),
+            source: self.obj.position(),
+            destination: if touch_boundary {
+                self.obj.position()
+            } else {
+                (dx, dy, self.obj.z())
+            },
+            trajectory: if touch_boundary { (0.0, 0.0) } else { (tx, ty) },
             entity_size: self.obj.size(),
             nearby: HashSet::new(),
         };
@@ -97,6 +114,29 @@ impl Entity {
         }
 
         query
+    }
+
+    /// Calculates a coordinate change, if the boundary is touched or exceed, it notifies the caller.
+    fn calc_coord_change(
+        source: i32,
+        trajectory: f32,
+        size: u16,
+        boundary: u32,
+        speed: f32,
+    ) -> (bool, i32) {
+        // Apply movement deltas within bounds.
+        let raw = source as f32 + (trajectory * speed);
+        let lower = (boundary - size as u32) as f32;
+        if raw < 0.0 {
+            // Cannot be lower than 0 coordinate (top-left)
+            (true, 0)
+        } else if lower < raw {
+            // Size exceeded a bottom-right coordinate.
+            (true, lower.floor() as i32)
+        } else {
+            // No change required.
+            (false, raw.floor() as i32)
+        }
     }
 
     /// Finalizes the movement utilizing the query. Updates the spatial hash with the new position.

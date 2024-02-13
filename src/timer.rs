@@ -1,9 +1,12 @@
 use std::time::Duration;
 
+use uuid::Uuid;
+
 /// Data that is attached to the timer.
 #[derive(Debug)]
 pub enum TimerData {
     Empty,
+    EntityDelete(Uuid),
 }
 
 /// Allows for tracking of various time sensitive events.
