@@ -3,6 +3,7 @@ mod client;
 mod entity;
 mod object;
 mod packet;
+mod region;
 mod server;
 mod spatial_hash;
 mod timer;

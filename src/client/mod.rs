@@ -56,11 +56,6 @@ impl Client {
     pub fn start(address: &str) -> Result<(), Box<dyn Error>> {
         // Create socket and tell the server we are joining.
         let socket = SocketClient::new(address);
-        let start: Position = (
-            WINDOW_DIMENSIONS.0 as i32 / 2,
-            WINDOW_DIMENSIONS.1 as i32 / 2,
-            1,
-        );
 
         let mut client = Self::new(socket);
         client.send(Action::ClientJoin, Payload::Empty);
@@ -76,9 +71,6 @@ impl Client {
 
         // Add the client as a player.
         cprintln!("Player UUID: {}", client.uuid());
-        client
-            .gamestate
-            .upsert_entity(client.uuid(), start, (32, 32));
 
         // Run the SDL2 game loop on the main thread.
         client.gameloop()?;
@@ -128,6 +120,7 @@ impl Client {
         let (win_x_center, win_y_center) = (win_width as i32 / 2, win_height as i32 / 2);
 
         // Calculate position to center the image
+        let mut player = self.player();
         let center_x = (win_width as i32 - img_width as i32) / 2;
         let center_y = (win_height as i32 - img_height as i32) / 2;
         let mut bg = Rect::new(center_x, center_y, img_width, img_height);
@@ -145,7 +138,7 @@ impl Client {
                 cprintln!("Expired: {:?}", timer);
             }
 
-            let player = self.player();
+            player = self.player();
             let mut projectile: (f32, f32) = (0.0, 0.0);
 
             for event in event_pump.poll_iter() {
@@ -256,8 +249,8 @@ impl Client {
             // Renders the background and gamestate entities.
             // Move the background / map.
             let offset = player.center_offset(WINDOW_DIMENSIONS);
-            bg.set_x(center_x - offset.0);
-            bg.set_y(center_y - offset.1);
+            bg.set_x(-offset.0);
+            bg.set_y(-offset.1);
             canvas.copy(&background_texture, None, Some(bg))?;
 
             self.gamestate.draw(&mut canvas, offset);

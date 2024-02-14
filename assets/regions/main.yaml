@@ -1,0 +1,9 @@
+name: "Mainland"
+description: "A description here."
+spawn: [512, 512, 1]
+file: "assets/background.png"
+boundaries:
+  x: 0
+  y: 0
+  width: 1024
+  height: 1024

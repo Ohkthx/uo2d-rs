@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::object::{Object, Position};
+use crate::region::{Boundary, Region};
 use crate::spatial_hash::SpatialHash;
 
 /// A query to move an entity. Useful to check multiple movements in 1 tick.
@@ -77,32 +78,25 @@ impl Entity {
     pub fn check_move(
         &self,
         spatial_area: &mut SpatialHash,
-        boundary: (u32, u32),
+        region: &Region,
         trajectory: (f32, f32),
         speed: f32,
     ) -> MoveQuery {
         let (tx, ty) = trajectory;
-        let (bx, by) = boundary;
+        let b = &region.boundaries;
         let (x, y) = self.obj.top_left();
         let (w, h) = self.obj.size();
 
         // Apply movement deltas within bounds.
-        let mut touch_boundary: bool = false;
-        let (touched, dx) = Self::calc_coord_change(x, tx, w, bx, speed);
-        touch_boundary |= touched;
-        let (touched, dy) = Self::calc_coord_change(y, ty, h, by, speed);
-        touch_boundary |= touched;
+        let dx = Self::calc_coord_change(x, tx, w, b, speed, true);
+        let dy = Self::calc_coord_change(y, ty, h, b, speed, false);
 
         // Builds the query.
         let mut query = MoveQuery {
             uuid: self.uuid,
             source: self.obj.position(),
-            destination: if touch_boundary {
-                self.obj.position()
-            } else {
-                (dx, dy, self.obj.z())
-            },
-            trajectory: if touch_boundary { (0.0, 0.0) } else { (tx, ty) },
+            destination: (dx, dy, self.obj.z()),
+            trajectory: (tx, ty),
             entity_size: self.obj.size(),
             nearby: HashSet::new(),
         };
@@ -121,22 +115,20 @@ impl Entity {
         source: i32,
         trajectory: f32,
         size: u16,
-        boundary: u32,
+        boundary: &Boundary,
         speed: f32,
-    ) -> (bool, i32) {
-        // Apply movement deltas within bounds.
-        let raw = source as f32 + (trajectory * speed);
-        let lower = (boundary - size as u32) as f32;
-        if raw < 0.0 {
-            // Cannot be lower than 0 coordinate (top-left)
-            (true, 0)
-        } else if lower < raw {
-            // Size exceeded a bottom-right coordinate.
-            (true, lower.floor() as i32)
+        x_axis: bool,
+    ) -> i32 {
+        let (min, max) = if x_axis {
+            (boundary.width, boundary.x as f32)
         } else {
-            // No change required.
-            (false, raw.floor() as i32)
-        }
+            (boundary.height, boundary.y as f32)
+        };
+
+        (source as f32 + (trajectory * speed))
+            .max(max)
+            .min((min - size as u32) as f32)
+            .floor() as i32
     }
 
     /// Finalizes the movement utilizing the query. Updates the spatial hash with the new position.

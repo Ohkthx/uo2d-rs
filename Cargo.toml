@@ -14,3 +14,5 @@ num-derive = { version = "0.4.2" }
 chrono = { version = "0.4.33" }
 # SDL requirements.
 sdl2 = { version = "0.36.0", features = ["image", "ttf"] }
+# Loading assets
+serde_yaml = { version = "0.8" }

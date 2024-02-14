@@ -8,7 +8,9 @@ use crate::entity::{Entity, EntityType};
 use crate::object::Position;
 use crate::packet::payloads::MovementPayload;
 use crate::packet::{Action, BroadcastScope, Packet, PacketConfiguration, Payload};
+use crate::region::Region;
 use crate::spatial_hash::SpatialHash;
+use crate::sprintln;
 use crate::timer::{TimerData, TimerManager};
 
 use super::PacketCacheAsync;
@@ -20,31 +22,44 @@ pub struct Gamestate {
     cache: PacketCacheAsync,
     spatial: SpatialHash,
     entities: HashMap<Uuid, Entity>,
-    boundary: (u32, u32),
+    regions: Vec<Region>,
+    spawn: Option<Region>,
 }
 
 impl Gamestate {
     const PROJECTILE_LIFESPAN: f32 = 10.0;
 
     /// Create a new Gamestate.
-    pub fn new(
-        tx: Sender<PacketConfiguration>,
-        cache: PacketCacheAsync,
-        boundary: (u32, u32),
-    ) -> Self {
+    pub fn new(tx: Sender<PacketConfiguration>, cache: PacketCacheAsync) -> Self {
+        let regions =
+            vec![Region::load("assets/regions/main.yaml").expect("Could not load region")];
         Self {
             sender: tx,
             timers: TimerManager::new(),
             cache,
             entities: HashMap::new(),
             spatial: SpatialHash::new(32),
-            boundary,
+            regions,
+            spawn: None,
         }
     }
 
     /// Obtains all pending packets from the cache.
     pub async fn get_packets(&mut self) -> Vec<Packet> {
         self.cache.get_all().await
+    }
+
+    /// Get the spawn location.
+    pub fn get_spawn_region(&self) -> &Region {
+        self.spawn.as_ref().expect("Spawn region is not set!")
+    }
+
+    /// Attempts to reverse lookup region from coordinates.
+    pub fn get_region(&self, position: Position) -> Option<Region> {
+        self.regions
+            .iter()
+            .find(|r| r.is_within(&position))
+            .cloned()
     }
 
     /// Remove an entity.
@@ -56,6 +71,7 @@ impl Gamestate {
 
     /// Starts the servers gameloop.
     pub async fn start(&mut self) {
+        self.spawn = self.get_region((512, 512, 1));
         // Create a test timer of 100 ticks and 5 seconds.
         self.timers.add_timer_tick(1000, TimerData::Empty);
         self.timers.add_timer_sec(5.0, TimerData::Empty, true);
@@ -84,8 +100,8 @@ impl Gamestate {
                     Action::Shutdown => break 'running,
                     Action::ClientJoin => self.join(uuid),
                     Action::ClientLeave => self.remove_entity(&uuid),
-                    Action::Movement => self.movement(uuid, packet.payload(), false),
-                    Action::Projectile => self.movement(uuid, packet.payload(), true),
+                    Action::Movement => self.movement(uuid, packet.payload()),
+                    Action::Projectile => self.projectile(uuid, packet.payload()),
                     _ => (),
                 };
             }
@@ -94,7 +110,7 @@ impl Gamestate {
     }
 
     fn join(&mut self, uuid: Uuid) {
-        let position: Position = (self.boundary.0 as i32 / 2, self.boundary.1 as i32 / 2, 1);
+        let position: Position = self.get_spawn_region().spawn;
         let size = (32, 32);
 
         self.entities
@@ -125,36 +141,31 @@ impl Gamestate {
         ));
     }
 
-    fn movement(&mut self, uuid: Uuid, movement: Payload, is_projectile: bool) {
+    fn movement(&mut self, uuid: Uuid, movement: Payload) {
         let movement = match movement {
             Payload::Movement(movement) => movement,
             _ => return,
         };
 
-        // Give a limited lifespan to a projectile.
-        let entity_type = if is_projectile {
-            self.timers.add_timer_sec(
-                Self::PROJECTILE_LIFESPAN,
-                TimerData::EntityDelete(uuid),
-                true,
-            );
-            EntityType::Projectile
-        } else {
-            EntityType::Creature
-        };
-
-        self.entities
-            .entry(uuid)
-            .or_insert_with(|| Entity::new(uuid, movement.position, movement.size, entity_type));
-
+        // Only move valid existing entities.
         let entity = match self.entities.get(&uuid) {
             None => return,
             Some(entity) => entity,
         };
 
+        // Try to locate the region.
+        let region = match self.get_region(entity.object().position()) {
+            Some(region) => region,
+            None => {
+                sprintln!("Unable to find region for {}", entity.uuid);
+                return;
+            }
+        };
+
+        // Get the attempted movement.
         let mut query = entity.check_move(
             &mut self.spatial,
-            self.boundary,
+            &region,
             movement.trajectory,
             movement.speed,
         );
@@ -187,6 +198,46 @@ impl Gamestate {
         }
     }
 
+    fn projectile(&mut self, uuid: Uuid, payload: Payload) {
+        let movement = match payload.clone() {
+            Payload::Movement(movement) => movement,
+            _ => return,
+        };
+
+        // Try to locate the region and only spawn if it is within region bounds.
+        match self.get_region(movement.position) {
+            Some(region) => {
+                if !region.is_inbounds(&movement.position, movement.size) {
+                    return;
+                }
+            }
+            None => return,
+        };
+
+        self.entities.entry(uuid).or_insert_with(|| {
+            Entity::new(
+                uuid,
+                movement.position,
+                movement.size,
+                EntityType::Projectile,
+            )
+        });
+
+        let entity = match self.entities.get(&uuid) {
+            None => return,
+            Some(entity) => entity,
+        };
+        self.spatial.insert_entity(entity);
+
+        self.timers.add_timer_sec(
+            Self::PROJECTILE_LIFESPAN,
+            TimerData::EntityDelete(uuid),
+            true,
+        );
+
+        self.movement(uuid, payload)
+    }
+
     /// Called on every tick for the server.
     fn update(&mut self) {
         let entities: Vec<Entity> = self
@@ -207,7 +258,6 @@ impl Gamestate {
                         entity.last_trajectory,
                         5.0,
                     )),
-                    true,
                 )
             } else {
                 // If it is stuck, delete it.

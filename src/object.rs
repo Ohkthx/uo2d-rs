@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
+
 /// Position containing an x, y, and z-axis.
 pub type Position = (i32, i32, i8);
 
 /// Represents and object that takes up space and has a z-axis (layer).
-#[derive(Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub struct Object {
     /// Left / Right coord.
     x: i32,
@@ -11,14 +13,20 @@ pub struct Object {
     /// Layer object exists on.
     z: i8,
     /// Width of the object.
-    w: u16,
+    width: u16,
     /// Height of the object.
-    h: u16,
+    height: u16,
 }
 
 impl Object {
-    pub fn new(x: i32, y: i32, z: i8, w: u16, h: u16) -> Self {
-        Self { x, y, z, w, h }
+    pub fn new(x: i32, y: i32, z: i8, width: u16, height: u16) -> Self {
+        Self {
+            x,
+            y,
+            z,
+            width,
+            height,
+        }
     }
 
     #[inline]
@@ -43,12 +51,12 @@ impl Object {
 
     #[inline]
     pub fn width(&self) -> u16 {
-        self.w
+        self.width
     }
 
     #[inline]
     pub fn height(&self) -> u16 {
-        self.h
+        self.height
     }
 
     #[inline]
@@ -87,23 +95,23 @@ impl Object {
     /// Updates the entire object.
     pub fn update(&mut self, position: (i32, i32, i8), width: u16, height: u16) {
         self.update_position(position);
-        if width > self.w {
-            self.w = width;
+        if width > self.width {
+            self.width = width;
         }
 
-        if height > self.h {
-            self.h = height;
+        if height > self.height {
+            self.height = height;
         }
     }
 
     /// Get the range for nearby objects.
     pub fn range(&self, scalar: u16) -> Object {
-        let new_width = self.w * scalar;
-        let new_height = self.h * scalar;
+        let new_width = self.width * scalar;
+        let new_height = self.height * scalar;
 
         // Calculate how much the width and height have increased.
-        let width_increase = new_width as i32 - self.w as i32;
-        let height_increase = new_height as i32 - self.h as i32;
+        let width_increase = new_width as i32 - self.width as i32;
+        let height_increase = new_height as i32 - self.height as i32;
 
         // Shift x and y to adjust for the increase in size, to keep the center the same.
         let x = self.x - width_increase / 2;
@@ -121,12 +129,12 @@ impl Object {
         }
 
         // Check if one rectangle is to the left of the other.
-        if self.x + self.w as i32 <= other.x || other.x + other.w as i32 <= self.x {
+        if self.x + self.width as i32 <= other.x || other.x + other.width as i32 <= self.x {
             return false;
         }
 
         // Check if one rectangle is above the other.
-        if self.y + self.h as i32 <= other.y || other.y + other.h as i32 <= self.y {
+        if self.y + self.height as i32 <= other.y || other.y + other.height as i32 <= self.y {
             return false;
         }
 

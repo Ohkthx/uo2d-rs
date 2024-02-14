@@ -38,8 +38,8 @@ impl Entity {
         let (x, y, _z) = self.position;
 
         // Calculate the offsets to center (x, y) on (n, m)
-        let a = x - n / 2;
-        let b = y - m / 2;
+        let a = x - (n / 2);
+        let b = y - (m / 2);
 
         (a, b)
     }

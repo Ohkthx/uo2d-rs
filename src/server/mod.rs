@@ -63,7 +63,7 @@ impl Server {
 
             // Block on the async `start` function using the runtime
             rt.block_on(async {
-                let mut gamestate = Gamestate::new(tx, packet_cache, (800, 800));
+                let mut gamestate = Gamestate::new(tx, packet_cache);
                 gamestate.start().await;
             });
         });
