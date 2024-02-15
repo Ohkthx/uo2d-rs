@@ -1,0 +1,13 @@
+name: "Floor 2"
+description: "A description here."
+spawn: [1600, 300, 1]
+file: "assets/background.png"
+vertices:
+  - [1088, 0]
+  - [2112, 0]
+  - [2112, 642]
+  - [1750, 642]
+  - [1750, 603]
+  - [1448, 603]
+  - [1448, 642]
+  - [1088, 642]

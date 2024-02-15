@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::object::{Object, Position};
-use crate::region::{Boundary, Region};
+use crate::region::Region;
 use crate::spatial_hash::SpatialHash;
 
 /// A query to move an entity. Useful to check multiple movements in 1 tick.
@@ -83,13 +83,15 @@ impl Entity {
         speed: f32,
     ) -> MoveQuery {
         let (tx, ty) = trajectory;
-        let b = &region.boundaries;
-        let (x, y) = self.obj.top_left();
-        let (w, h) = self.obj.size();
 
         // Apply movement deltas within bounds.
-        let dx = Self::calc_coord_change(x, tx, w, b, speed, true);
-        let dy = Self::calc_coord_change(y, ty, h, b, speed, false);
+        let (dx, dy, _) = Self::calc_coord_change(
+            self.obj.position(),
+            trajectory,
+            self.obj.size(),
+            region,
+            speed,
+        );
 
         // Builds the query.
         let mut query = MoveQuery {
@@ -110,25 +112,42 @@ impl Entity {
         query
     }
 
-    /// Calculates a coordinate change, if the boundary is touched or exceed, it notifies the caller.
+    /// Calculates a coordinate change, if the boundary is touched or exceed, that is set as the maximum/minimum.
     fn calc_coord_change(
-        source: i32,
-        trajectory: f32,
-        size: u16,
-        boundary: &Boundary,
+        source: Position,
+        trajectory: (f32, f32),
+        size: (u16, u16),
+        region: &Region,
         speed: f32,
-        x_axis: bool,
-    ) -> i32 {
-        let (min, max) = if x_axis {
-            (boundary.width, boundary.x as f32)
-        } else {
-            (boundary.height, boundary.y as f32)
-        };
+    ) -> Position {
+        let step_size = 1.0;
+        let mut step = speed;
 
-        (source as f32 + (trajectory * speed))
-            .max(max)
-            .min((min - size as u32) as f32)
-            .floor() as i32
+        let mut position = source;
+
+        while step > 0.0 {
+            // Calculate a tentative new position along the trajectory.
+            let new_x = (source.0 as f32 + trajectory.0 * step).floor() as i32;
+            let new_y = (source.1 as f32 + trajectory.1 * step).floor() as i32;
+
+            // Generate test positions for the entity's corners at the tentative position.
+            let test_positions = [
+                (new_x, new_y, source.2),                                 // Top-left corner
+                (new_x + size.0 as i32, new_y, source.2),                 // Top-right corner
+                (new_x, new_y + size.1 as i32, source.2),                 // Bottom-left corner
+                (new_x + size.0 as i32, new_y + size.1 as i32, source.2), // Bottom-right corner
+            ];
+
+            // Check if all corners of the entity at the tentative position are within the region.
+            if test_positions.iter().all(|&pos| region.is_within(&pos)) {
+                position = (new_x, new_y, source.2);
+                break;
+            }
+
+            step -= step_size;
+        }
+
+        position
     }
 
     /// Finalizes the movement utilizing the query. Updates the spatial hash with the new position.

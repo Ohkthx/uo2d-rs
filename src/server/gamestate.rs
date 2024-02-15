@@ -8,7 +8,7 @@ use crate::entity::{Entity, EntityType};
 use crate::object::Position;
 use crate::packet::payloads::MovementPayload;
 use crate::packet::{Action, BroadcastScope, Packet, PacketConfiguration, Payload};
-use crate::region::Region;
+use crate::region::{Region, RegionManager};
 use crate::spatial_hash::SpatialHash;
 use crate::sprintln;
 use crate::timer::{TimerData, TimerManager};
@@ -22,8 +22,7 @@ pub struct Gamestate {
     cache: PacketCacheAsync,
     spatial: SpatialHash,
     entities: HashMap<Uuid, Entity>,
-    regions: Vec<Region>,
-    spawn: Option<Region>,
+    regions: RegionManager,
 }
 
 impl Gamestate {
@@ -31,8 +30,8 @@ impl Gamestate {
 
     /// Create a new Gamestate.
     pub fn new(tx: Sender<PacketConfiguration>, cache: PacketCacheAsync) -> Self {
-        let regions =
-            vec![Region::load("assets/regions/main.yaml").expect("Could not load region")];
+        let regions = RegionManager::new();
+
         Self {
             sender: tx,
             timers: TimerManager::new(),
@@ -40,7 +39,6 @@ impl Gamestate {
             entities: HashMap::new(),
             spatial: SpatialHash::new(32),
             regions,
-            spawn: None,
         }
     }
 
@@ -51,15 +49,14 @@ impl Gamestate {
 
     /// Get the spawn location.
     pub fn get_spawn_region(&self) -> &Region {
-        self.spawn.as_ref().expect("Spawn region is not set!")
+        self.regions
+            .get_region(&(512, 512, 1))
+            .expect("Spawn region is not set!")
     }
 
     /// Attempts to reverse lookup region from coordinates.
-    pub fn get_region(&self, position: Position) -> Option<Region> {
-        self.regions
-            .iter()
-            .find(|r| r.is_within(&position))
-            .cloned()
+    pub fn get_region(&self, position: &Position) -> Option<&Region> {
+        self.regions.get_region(position)
     }
 
     /// Remove an entity.
@@ -71,7 +68,6 @@ impl Gamestate {
 
     /// Starts the servers gameloop.
     pub async fn start(&mut self) {
-        self.spawn = self.get_region((512, 512, 1));
         // Create a test timer of 100 ticks and 5 seconds.
         self.timers.add_timer_tick(1000, TimerData::Empty);
         self.timers.add_timer_sec(5.0, TimerData::Empty, true);
@@ -111,6 +107,7 @@ impl Gamestate {
 
     fn join(&mut self, uuid: Uuid) {
         let position: Position = self.get_spawn_region().spawn;
+        sprintln!("Spawn set to: {:?}", position);
         let size = (32, 32);
 
         self.entities
@@ -154,8 +151,8 @@ impl Gamestate {
         };
 
         // Try to locate the region.
-        let region = match self.get_region(entity.object().position()) {
-            Some(region) => region,
+        let region = match self.get_region(&entity.object().position()) {
+            Some(region) => region.clone(),
             None => {
                 sprintln!("Unable to find region for {}", entity.uuid);
                 return;
@@ -205,7 +202,7 @@ impl Gamestate {
         };
 
         // Try to locate the region and only spawn if it is within region bounds.
-        match self.get_region(movement.position) {
+        match self.get_region(&movement.position) {
             Some(region) => {
                 if !region.is_inbounds(&movement.position, movement.size) {
                     return;

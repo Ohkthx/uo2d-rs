@@ -83,7 +83,7 @@ impl Gamestate {
             timers: TimerManager::new(),
             locations: HashMap::new(),
             entities: HashMap::new(),
-            next_color: (0, 0, 0),
+            next_color: (255, 0, 0),
             kill: false,
         }
     }

@@ -120,7 +120,6 @@ impl Client {
         let (win_x_center, win_y_center) = (win_width as i32 / 2, win_height as i32 / 2);
 
         // Calculate position to center the image
-        let mut player = self.player();
         let center_x = (win_width as i32 - img_width as i32) / 2;
         let center_y = (win_height as i32 - img_height as i32) / 2;
         let mut bg = Rect::new(center_x, center_y, img_width, img_height);
@@ -138,7 +137,7 @@ impl Client {
                 cprintln!("Expired: {:?}", timer);
             }
 
-            player = self.player();
+            let player = self.player();
             let mut projectile: (f32, f32) = (0.0, 0.0);
 
             for event in event_pump.poll_iter() {
