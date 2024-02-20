@@ -3,6 +3,12 @@ name = "uo2d"
 version = "0.0.1"
 edition = "2021"
 
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+
 [dependencies]
 # Client and Server requirements.
 tokio = { version = "1", features = ["full"] }

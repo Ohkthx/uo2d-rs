@@ -46,10 +46,10 @@ pub struct TimerManager {
 }
 
 impl TimerManager {
-    const SERVER_TICKS_PER_SECOND: f32 = 160.0;
+    const SERVER_TICKS_PER_SECOND: f32 = 180.0;
     const SERVER_TICK_RATE_MICROSECOND: f32 = 1_000_000.0 / Self::SERVER_TICKS_PER_SECOND;
 
-    const CLIENT_TICKS_PER_SECOND: f32 = Self::SERVER_TICKS_PER_SECOND / 2.0;
+    const CLIENT_TICKS_PER_SECOND: f32 = Self::SERVER_TICKS_PER_SECOND / 3.0;
     const CLIENT_TICK_RATE_MICROSECOND: f32 = 1_000_000.0 / Self::CLIENT_TICKS_PER_SECOND;
 
     /// Creates a new manager for timers.
@@ -62,14 +62,18 @@ impl TimerManager {
         }
     }
 
+    /// Current tick the server is on.
+    #[allow(dead_code)]
+    pub fn tick(&self) -> u64 {
+        self.tick
+    }
+
     /// Amount of time per server tick.
-    #[inline]
     pub fn server_tick_time(&self) -> Duration {
         self.server_tick
     }
 
     /// Amount of time per client tick.
-    #[inline]
     pub fn client_tick_time(&self) -> Duration {
         self.client_tick
     }

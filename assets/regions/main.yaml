@@ -3,7 +3,7 @@ description: "A description here."
 spawn: [512, 512, 1]
 file: "assets/background.png"
 vertices:
-  - [0, 0]
-  - [1024, 0]
-  - [1024, 1024]
-  - [0, 1024]
+  - [0, 0, 0]
+  - [1024, 0, 0]
+  - [1024, 1024, 0]
+  - [0, 1024, 0]

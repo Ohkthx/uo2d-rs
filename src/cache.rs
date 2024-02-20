@@ -71,8 +71,8 @@ impl PacketCacheAsync {
 
     /// Retrieve received packets from the cache. This clears the packet list and their counts.
     pub async fn get_all(&self) -> Vec<Packet> {
-        let mut counts = self.counts.lock().await; // Lock counts first
-        let mut packets = self.packets.lock().await; // Then lock packets
+        let mut counts = self.counts.lock().await;
+        let mut packets = self.packets.lock().await;
 
         counts.clear();
         std::mem::take(&mut *packets)
@@ -80,14 +80,15 @@ impl PacketCacheAsync {
 
     /// Add a new packet to the cache if it doesn't exceed allowed duplicates.
     pub async fn add(&self, packet: Packet) {
-        let mut counts = self.counts.lock().await; // Lock counts first, consistent with get_all
+        let mut counts = self.counts.lock().await;
 
         let signature = packet.signature();
         let count = counts.entry(signature.to_vec()).or_insert(0);
 
-        if *count < self.allowed_duplicates {
+        if *count <= self.allowed_duplicates {
             *count += 1;
-            let mut packets = self.packets.lock().await; // Then lock packets
+
+            let mut packets = self.packets.lock().await;
             packets.push(packet);
         }
     }

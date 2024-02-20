@@ -265,7 +265,9 @@ impl SocketServer {
 
         // Broadcast to all selected clients.
         for client in clients {
-            let _ = Self::exec_send(socket, &client.addr, packet.clone()).await;
+            if let Err(why) = Self::exec_send(socket, &client.addr, packet.clone()).await {
+                sprintln!("Error while broadcasting to client: {:?}", why.to_string());
+            }
         }
 
         Ok(())

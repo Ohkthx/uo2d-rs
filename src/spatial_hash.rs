@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
-use crate::entity::{Entity, MoveQuery};
-use crate::object::{Object, Position};
+use crate::components::{Bounds, Vec2, Vec3};
+use crate::entities::{Mobile, MoveQuery};
 
 #[derive(Default)]
 struct Cell {
@@ -12,13 +12,13 @@ struct Cell {
 
 /// Spatial Hash is used to check locality of entities and check collisions.
 pub struct SpatialHash {
-    cell_size: i32,
-    cells: HashMap<(i32, i32), Cell>,
+    cell_size: usize,
+    cells: HashMap<(usize, usize), Cell>,
 }
 
 impl SpatialHash {
     /// Creates a new Spatial Hash, the cell_size should be the average size of entities.
-    pub fn new(cell_size: i32) -> Self {
+    pub fn new(cell_size: usize) -> Self {
         Self {
             cell_size,
             cells: HashMap::new(),
@@ -27,43 +27,43 @@ impl SpatialHash {
 
     /// Translates coordinates into cell coordinates.
     #[inline]
-    fn cell_coords(&self, position: (i32, i32)) -> (i32, i32) {
-        (position.0 / self.cell_size, position.1 / self.cell_size)
+    fn cell_coords(&self, position: Vec2) -> (usize, usize) {
+        (
+            position.x() as usize / self.cell_size,
+            position.y() as usize / self.cell_size,
+        )
     }
 
     /// Adds an entity into a cell, pulling the locational data from it.
-    pub fn insert_entity(&mut self, entity: &Entity) {
-        let uuid = entity.uuid;
-
-        let (start_x, start_y) = self.cell_coords(entity.object().top_left());
-        let (end_x, end_y) = self.cell_coords(entity.object().bottom_right());
+    pub fn insert_object(&mut self, uuid: &Uuid, obj: &Bounds) {
+        let (start_x, start_y) = self.cell_coords(obj.top_left_2d());
+        let (end_x, end_y) = self.cell_coords(obj.bottom_right_2d());
 
         for x in start_x..=end_x {
             for y in start_y..=end_y {
-                self.cells.entry((x, y)).or_default().entities.insert(uuid);
+                self.cells.entry((x, y)).or_default().entities.insert(*uuid);
             }
         }
     }
 
     /// Removes an entity from a cell, pulling the locational data from it.
-    pub fn remove_entity(&mut self, entity: &Entity) {
-        let uuid = entity.uuid;
-        let (start_cell_x, start_cell_y) = self.cell_coords(entity.object().top_left());
-        let (end_cell_x, end_cell_y) = self.cell_coords(entity.object().bottom_right());
+    pub fn remove_object(&mut self, uuid: &Uuid, obj: &Bounds) {
+        let (start_cell_x, start_cell_y) = self.cell_coords(obj.top_left_2d());
+        let (end_cell_x, end_cell_y) = self.cell_coords(obj.bottom_right_2d());
 
         for x in start_cell_x..=end_cell_x {
             for y in start_cell_y..=end_cell_y {
                 if let Some(cell) = self.cells.get_mut(&(x, y)) {
-                    cell.entities.remove(&uuid);
+                    cell.entities.remove(uuid);
                 }
             }
         }
     }
 
     // Queries for UUIDs of entities within the specified rectangle
-    pub fn query(&self, entity: &Object, exclude_uuid: Option<Uuid>) -> HashSet<Uuid> {
-        let start = self.cell_coords(entity.top_left());
-        let end = self.cell_coords(entity.bottom_right());
+    pub fn query(&self, bounds: &Bounds, exclude_uuid: Option<&Uuid>) -> HashSet<Uuid> {
+        let start = self.cell_coords(bounds.top_left_2d());
+        let end = self.cell_coords(bounds.bottom_right_2d());
 
         let (start_x, start_y) = start;
         let (end_x, end_y) = end;
@@ -74,7 +74,7 @@ impl SpatialHash {
                 if let Some(cell) = self.cells.get(&(cell_x, cell_y)) {
                     for &entity_id in &cell.entities {
                         // Check if the UUID is not the one to be excluded, if any
-                        if exclude_uuid.map_or(true, |excl_uuid| entity_id != excl_uuid) {
+                        if exclude_uuid.map_or(true, |excl_uuid| entity_id != *excl_uuid) {
                             result.insert(entity_id);
                         }
                     }
@@ -85,47 +85,57 @@ impl SpatialHash {
         result
     }
 
-    /// Get the closest position before collision.
-    pub fn till_collision(query: &MoveQuery, entity: &Entity) -> Option<Position> {
-        if query.nearby.is_empty() || query.uuid == entity.uuid {
+    pub fn till_collision(query: &MoveQuery, bounds: &Bounds) -> Option<Vec3> {
+        if query.nearby.is_empty() {
+            // If there are no nearby objects, the path to the destination is clear.
             return Some(query.destination);
         }
 
-        let (sx, sy, sz) = query.source;
-        let (mut x, mut y, z) = query.destination;
-        let (dx, dy) = query.trajectory;
+        // Extract initial positions and size
+        let (sx, sy, _) = query.source.as_tuple();
+        let (mut dx, mut dy, dz) = query.destination.as_tuple();
+        let (vel_x, vel_y) = query.velocity.as_tuple();
         let (w, h) = query.entity_size;
 
-        // Correct approach to move back towards the source incrementally
-        while entity.object().intersects(&Object::new(x, y, z, w, h)) {
-            // Move back one step at a time towards the source
-            if dx > 0.0 && x > sx {
-                x -= 1;
-            } else if dx < 0.0 && x < sx {
-                x += 1;
+        // If the destination does not intersect with bounds, return it directly
+        if !bounds.intersects_3d(&Bounds::new(dx, dy, dz, w, h)) {
+            return Some(Vec3::new(dx, dy, dz));
+        }
+
+        // Calculate the step size for backtracking based on velocity direction
+        let step_x = vel_x.signum();
+        let step_y = vel_y.signum();
+
+        while bounds.intersects_3d(&Bounds::new(dx, dy, dz, w, h)) {
+            // Move back towards the source position incrementally, based on the direction of the velocity
+            if vel_x != 0.0 {
+                dx -= step_x;
+            }
+            if vel_y != 0.0 {
+                dy -= step_y;
             }
 
-            if dy > 0.0 && y > sy {
-                y -= 1;
-            } else if dy < 0.0 && y < sy {
-                y += 1;
-            }
-
-            // Check if we have returned to the source position
-            if (x == sx && y == sy) || (dx == 0.0 && dy == 0.0) {
-                // If at source or no movement in trajectory, check for collision at source
-                if entity.object().intersects(&Object::new(sx, sy, sz, w, h)) {
-                    return Some((sx, sy, sz));
-                }
+            // Check if the position has moved back to or past the source; if so, break the loop
+            if (vel_x > 0.0 && dx <= sx)
+                || (vel_x < 0.0 && dx >= sx)
+                || (vel_y > 0.0 && dy <= sy)
+                || (vel_y < 0.0 && dy >= sy)
+            {
                 break;
             }
         }
 
-        Some((x, y, z))
+        // After adjusting, if we're still in bounds or have returned to the source, return None
+        if bounds.intersects_3d(&Bounds::new(dx, dy, dz, w, h)) || (dx == sx && dy == sy) {
+            return None;
+        }
+
+        // Return the adjusted position if a collision-free spot is found
+        Some(Vec3::new(dx, dy, dz))
     }
 
     /// The coordinates that can be moved in until a collision is detected.
-    pub fn till_collisions(query: &MoveQuery, objects: &HashMap<Uuid, Entity>) -> Option<Position> {
+    pub fn till_collisions(query: &MoveQuery, objects: &HashMap<Uuid, Mobile>) -> Option<Vec3> {
         if query.nearby.is_empty() {
             // If there are no nearby objects, we can move to the destination.
             return Some(query.destination);
@@ -142,7 +152,7 @@ impl SpatialHash {
 
             if let Some(entity) = objects.get(uuid) {
                 // Use till_collision for each entity to check for collisions.
-                match SpatialHash::till_collision(query, entity) {
+                match SpatialHash::till_collision(query, &entity.transform.bounding_box()) {
                     Some(pos) => {
                         // If till_collision returns a position, check if it's closer than the current closest_position.
                         if !collision_detected
@@ -169,10 +179,9 @@ impl SpatialHash {
     }
 
     // Helper function to check if a position is closer to the source
-    fn is_closer_to_source(source: Position, new_pos: Position, current_pos: Position) -> bool {
-        let dist_new = (new_pos.0 - source.0).pow(2) + (new_pos.1 - source.1).pow(2);
-        let dist_current = (current_pos.0 - source.0).pow(2) + (current_pos.1 - source.1).pow(2);
-
+    fn is_closer_to_source(source: Vec3, new_pos: Vec3, current_pos: Vec3) -> bool {
+        let dist_new = new_pos.distance_2d(&source);
+        let dist_current = current_pos.distance_2d(&source);
         dist_new < dist_current
     }
 }

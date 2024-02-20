@@ -4,11 +4,10 @@ use std::thread::sleep;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
-use crate::entity::{Entity, EntityType};
-use crate::object::Position;
+use crate::components::{Bounds, Vec2, Vec3};
+use crate::entities::{Mobile, MobileType, Region, RegionManager};
 use crate::packet::payloads::MovementPayload;
 use crate::packet::{Action, BroadcastScope, Packet, PacketConfiguration, Payload};
-use crate::region::{Region, RegionManager};
 use crate::spatial_hash::SpatialHash;
 use crate::sprintln;
 use crate::timer::{TimerData, TimerManager};
@@ -21,12 +20,13 @@ pub struct Gamestate {
     timers: TimerManager,
     cache: PacketCacheAsync,
     spatial: SpatialHash,
-    entities: HashMap<Uuid, Entity>,
+    entities: HashMap<Uuid, Mobile>,
     regions: RegionManager,
 }
 
 impl Gamestate {
     const PROJECTILE_LIFESPAN: f32 = 10.0;
+    const MAX_SPEED: f64 = 5.;
 
     /// Create a new Gamestate.
     pub fn new(tx: Sender<PacketConfiguration>, cache: PacketCacheAsync) -> Self {
@@ -50,19 +50,20 @@ impl Gamestate {
     /// Get the spawn location.
     pub fn get_spawn_region(&self) -> &Region {
         self.regions
-            .get_region(&(512, 512, 1))
+            .get_region(&Vec3::new(512., 512., 1.))
             .expect("Spawn region is not set!")
     }
 
     /// Attempts to reverse lookup region from coordinates.
-    pub fn get_region(&self, position: &Position) -> Option<&Region> {
+    pub fn get_region(&self, position: &Vec3) -> Option<&Region> {
         self.regions.get_region(position)
     }
 
     /// Remove an entity.
     fn remove_entity(&mut self, uuid: &Uuid) {
         if let Some(entity) = self.entities.remove(uuid) {
-            self.spatial.remove_entity(&entity)
+            self.spatial
+                .remove_object(&entity.uuid, &entity.transform.bounding_box())
         }
     }
 
@@ -76,7 +77,8 @@ impl Gamestate {
             for timer in self.timers.update() {
                 if let TimerData::EntityDelete(uuid) = timer.data {
                     if let Some(entity) = self.entities.get(&uuid) {
-                        let nearby = self.spatial.query(&entity.object().range(10), Some(uuid));
+                        let range = entity.transform.bounding_box().scaled_center(10.);
+                        let nearby = self.spatial.query(&range, Some(&uuid));
                         let _ = self.sender.try_send(PacketConfiguration::Broadcast(
                             Packet::new(Action::EntityDelete, uuid, Payload::Empty),
                             BroadcastScope::Local(nearby),
@@ -106,29 +108,29 @@ impl Gamestate {
     }
 
     fn join(&mut self, uuid: Uuid) {
-        let position: Position = self.get_spawn_region().spawn;
+        let position: Vec3 = self.get_spawn_region().spawn;
         sprintln!("Spawn set to: {:?}", position);
-        let size = (32, 32);
+        let size = Vec2::new(32., 32.);
 
         self.entities
             .entry(uuid)
-            .or_insert_with(|| Entity::new(uuid, position, size, EntityType::Creature));
+            .or_insert_with(|| Mobile::new(uuid, position, size, MobileType::Creature));
 
         let entity = match self.entities.get(&uuid) {
             None => return,
             Some(entity) => entity,
         };
-        self.spatial.insert_entity(entity);
+        self.spatial.insert_object(&uuid, &entity.bounding_box());
 
         let payload = Payload::Movement(MovementPayload::new(
-            entity.object().size(),
-            entity.object().position(),
-            (0.0, 0.0),
-            0.0,
+            entity.bounding_box().dimensions(),
+            entity.bounding_box().top_left_3d(),
+            Vec2::ORIGIN,
         ));
 
         // The scope of who to send these packets to.
-        let nearby = self.spatial.query(&entity.object().range(10), Some(uuid));
+        let range = entity.bounding_box().scaled_center(10.);
+        let nearby = self.spatial.query(&range, Some(&uuid));
         let scope = BroadcastScope::Local(nearby);
 
         let _ = self.sender.try_send(PacketConfiguration::SuccessBroadcast(
@@ -151,7 +153,7 @@ impl Gamestate {
         };
 
         // Try to locate the region.
-        let region = match self.get_region(&entity.object().position()) {
+        let region = match self.get_region(&entity.transform.position()) {
             Some(region) => region.clone(),
             None => {
                 sprintln!("Unable to find region for {}", entity.uuid);
@@ -160,22 +162,21 @@ impl Gamestate {
         };
 
         // Get the attempted movement.
-        let mut query = entity.check_move(
-            &mut self.spatial,
-            &region,
-            movement.trajectory,
-            movement.speed,
-        );
+        let velocity = movement.velocity.clamped(0.0, Self::MAX_SPEED);
+        let mut query = entity.check_move(&mut self.spatial, &region, velocity);
 
         let pos = match SpatialHash::till_collisions(&query, &self.entities) {
             Some(pos) => pos,
-            None => return,
+            None => {
+                // Unavoidable collision detected.
+                query.source
+            }
         };
 
         // Perform move.
-        if let Some(entity) = self.entities.get_mut(&uuid) {
+        if let Some(mobile) = self.entities.get_mut(&uuid) {
             query.destination = pos;
-            entity.move_entity(&mut self.spatial, &query);
+            mobile.move_entity(&mut self.spatial, &query);
             if query.has_moved() {
                 let _ = self.sender.try_send(PacketConfiguration::Broadcast(
                     Packet::new(
@@ -183,9 +184,8 @@ impl Gamestate {
                         uuid,
                         Payload::Movement(MovementPayload::new(
                             movement.size,
-                            entity.object().position(),
-                            movement.trajectory,
-                            movement.speed,
+                            mobile.transform.position(),
+                            movement.velocity,
                         )),
                     ),
                     // Movement will only be sent to the nearby entities.
@@ -204,7 +204,8 @@ impl Gamestate {
         // Try to locate the region and only spawn if it is within region bounds.
         match self.get_region(&movement.position) {
             Some(region) => {
-                if !region.is_inbounds(&movement.position, movement.size) {
+                let bounds = Bounds::from_vec(movement.position, movement.size);
+                if !region.is_inbounds(&bounds) {
                     return;
                 }
             }
@@ -212,11 +213,11 @@ impl Gamestate {
         };
 
         self.entities.entry(uuid).or_insert_with(|| {
-            Entity::new(
+            Mobile::new(
                 uuid,
                 movement.position,
                 movement.size,
-                EntityType::Projectile,
+                MobileType::Projectile,
             )
         });
 
@@ -224,7 +225,8 @@ impl Gamestate {
             None => return,
             Some(entity) => entity,
         };
-        self.spatial.insert_entity(entity);
+        self.spatial
+            .insert_object(&entity.uuid, &entity.bounding_box());
 
         self.timers.add_timer_sec(
             Self::PROJECTILE_LIFESPAN,
@@ -232,35 +234,33 @@ impl Gamestate {
             true,
         );
 
-        self.movement(uuid, payload)
+        self.movement(uuid, payload);
     }
 
     /// Called on every tick for the server.
     fn update(&mut self) {
-        let entities: Vec<Entity> = self
+        let entities: Vec<Mobile> = self
             .entities
             .values()
-            .filter(|e| e.entity_type == EntityType::Projectile)
+            .filter(|e| e.mobile_type == MobileType::Projectile)
             .cloned()
             .collect();
 
         for entity in entities {
             // Move autonomous entities.
-            if entity.has_moved {
+            if entity.has_moved && entity.last_position != entity.position() {
                 self.movement(
                     entity.uuid,
                     Payload::Movement(MovementPayload::new(
-                        entity.object().size(),
-                        entity.object().position(),
-                        entity.last_trajectory,
-                        5.0,
+                        entity.bounding_box().dimensions(),
+                        entity.bounding_box().top_left_3d(),
+                        entity.last_velocity,
                     )),
                 )
             } else {
                 // If it is stuck, delete it.
-                let nearby = self
-                    .spatial
-                    .query(&entity.object().range(10), Some(entity.uuid));
+                let range = entity.bounding_box().scaled_center(10.);
+                let nearby = self.spatial.query(&range, Some(&entity.uuid));
                 let _ = self.sender.try_send(PacketConfiguration::Broadcast(
                     Packet::new(Action::EntityDelete, entity.uuid, Payload::Empty),
                     BroadcastScope::Local(nearby),

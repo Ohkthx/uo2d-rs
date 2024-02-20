@@ -2,25 +2,25 @@ use std::path::Path;
 use std::time::Duration;
 use std::{error::Error, thread};
 
-use sdl2::event::Event;
 use sdl2::image::{self, InitFlag, LoadTexture};
-use sdl2::keyboard::Keycode;
-use sdl2::mouse::MouseButton;
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 use sdl2::render::TextureQuery;
 use uuid::Uuid;
 
+use crate::components::{Bounds, Vec2, Vec3};
 use crate::cprintln;
-use crate::object::{Object, Position};
+use crate::entities::{Camera, Mobile};
 use crate::packet::payloads::MovementPayload;
 use crate::packet::{Action, Payload};
 
 mod gamestate;
+mod input;
 mod packet_processor;
 mod socket_client;
 
-use self::gamestate::{Entity, Gamestate};
+use self::gamestate::Gamestate;
+use self::input::Input;
 use self::socket_client::SocketClient;
 
 const WINDOW_DIMENSIONS: (u32, u32) = (800, 800);
@@ -48,7 +48,7 @@ impl Client {
         self.socket.uuid
     }
 
-    fn player(&self) -> &Entity {
+    fn player(&self) -> &Mobile {
         self.gamestate.get_entity(&self.uuid()).unwrap()
     }
 
@@ -115,150 +115,45 @@ impl Client {
             ..
         } = background_texture.query();
 
-        // Get window size
-        let (win_width, win_height) = canvas.window().size();
-        let (win_x_center, win_y_center) = (win_width as i32 / 2, win_height as i32 / 2);
+        // Create the camera.
+        let mut camera = Camera::new(
+            Vec3::ORIGIN,
+            Vec2::new(
+                canvas.window().size().0 as f64,
+                canvas.window().size().1 as f64,
+            ),
+        );
+
+        // Position the camera where the player is centered.
+        camera.center_on(self.player().position());
 
         // Calculate position to center the image
-        let center_x = (win_width as i32 - img_width as i32) / 2;
-        let center_y = (win_height as i32 - img_height as i32) / 2;
+        let center_x = (camera.bounding_box().width() as i32 - img_width as i32) / 2;
+        let center_y = (camera.bounding_box().height() as i32 - img_height as i32) / 2;
         let mut bg = Rect::new(center_x, center_y, img_width, img_height);
 
         let mut event_pump = sdl_context.event_pump().map_err(|e| e.to_string())?;
-        let move_speed = 5.0;
+        let mut input = Input::default();
+        input.mouse.set_delay(10);
+        let mut held_move: bool = false;
 
-        let mut left_mouse_down = false;
-        let mut right_mouse_down = false;
-        let mut target_pos: Option<(i32, i32)> = None;
-        let mut last_mouse_pos: Option<(i32, i32)> = None;
+        let move_speed = 5.0;
+        let mut move_to: Option<Vec2> = None;
 
         'running: loop {
             for timer in self.gamestate.timers.update() {
                 cprintln!("Expired: {:?}", timer);
             }
 
-            let player = self.player();
-            let mut projectile: (f32, f32) = (0.0, 0.0);
-
-            for event in event_pump.poll_iter() {
-                match event {
-                    Event::Quit { .. }
-                    | Event::KeyDown {
-                        keycode: Some(Keycode::Escape),
-                        ..
-                    } => break 'running,
-                    Event::MouseButtonDown {
-                        x, y, mouse_btn, ..
-                    } => {
-                        if mouse_btn == MouseButton::Left {
-                            left_mouse_down = true;
-                            last_mouse_pos = Some((x, y));
-                        }
-                        if mouse_btn == MouseButton::Right {
-                            right_mouse_down = true;
-                            last_mouse_pos = Some((x, y));
-                        }
-                    }
-                    Event::MouseButtonUp { mouse_btn, .. } => {
-                        if mouse_btn == MouseButton::Left {
-                            left_mouse_down = false;
-                        }
-                        if mouse_btn == MouseButton::Right {
-                            right_mouse_down = false;
-                        }
-                    }
-                    Event::MouseMotion { x, y, .. } => {
-                        if left_mouse_down || right_mouse_down {
-                            last_mouse_pos = Some((x, y));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            // Update the movement towards the mouse pointer.
-            if left_mouse_down {
-                if let Some((x, y)) = last_mouse_pos {
-                    let (dx, dy) = (x - win_x_center, y - win_y_center);
-                    target_pos = Some((player.position.0 + dx, player.position.1 + dy));
-                }
-            }
-
-            // Update the projectile towards the mouse pointer.
-            if right_mouse_down {
-                if let Some((x, y)) = last_mouse_pos {
-                    let (dx, dy) = (x - win_x_center, y - win_y_center);
-                    let mut focus = Some((player.position.0 + dx, player.position.1 + dy));
-                    projectile = calc_trajectory(player.position, move_speed, &mut focus);
-                }
-            }
-
-            // Check the current state of the keyboard
-            let mut trajectory: (f32, f32) = (0.0, 0.0);
-
-            let keyboard_state = event_pump.keyboard_state();
-            if keyboard_state.is_scancode_pressed(sdl2::keyboard::Scancode::W) {
-                trajectory.1 = -1.0; // Move up
-            }
-            if keyboard_state.is_scancode_pressed(sdl2::keyboard::Scancode::A) {
-                trajectory.0 = -1.0; // Move left
-            }
-            if keyboard_state.is_scancode_pressed(sdl2::keyboard::Scancode::S) {
-                trajectory.1 = 1.0; // Move down
-            }
-            if keyboard_state.is_scancode_pressed(sdl2::keyboard::Scancode::D) {
-                trajectory.0 = 1.0; // Move right
-            }
-
-            if trajectory != (0.0, 0.0) {
-                target_pos = None;
-            } else {
-                trajectory = calc_trajectory(player.position, move_speed, &mut target_pos);
-            }
-
-            // Produces a packet that we have moved to send to server.
-            if trajectory != (0.0, 0.0) {
-                let p = self.player();
-                self.send(
-                    Action::Movement,
-                    Payload::Movement(MovementPayload::new(
-                        p.size, p.position, trajectory, move_speed,
-                    )),
-                );
-            }
-
-            if projectile != (0.0, 0.0) {
-                let (x, y, z) = player.position;
-                let (w, h) = player.size;
-                let area = Object::new(x, y, z, w, h);
-                self.send(
-                    Action::Projectile,
-                    Payload::Movement(MovementPayload::new(
-                        (16, 16),
-                        area.place_outside(projectile, (16, 16), z),
-                        projectile,
-                        move_speed,
-                    )),
-                );
-            }
-
-            canvas.clear();
-            canvas.set_draw_color(Color::BLACK);
-
-            // Renders the background and gamestate entities.
-            // Move the background / map.
-            let offset = player.center_offset(WINDOW_DIMENSIONS);
-            bg.set_x(-offset.0);
-            bg.set_y(-offset.1);
-            canvas.copy(&background_texture, None, Some(bg))?;
-
-            self.gamestate.draw(&mut canvas, offset);
-
-            canvas.present();
-
             // Process the data from the server if there is any.
             let packets = self.socket.get_packets();
             for packet in packets.into_iter() {
+                if packet.uuid() == self.uuid() {
+                    if let Payload::Movement(movement) = packet.payload() {
+                        camera.center_on(movement.position);
+                    }
+                }
+
                 if let Some((action, payload)) =
                     self.socket.process_packet(&mut self.gamestate, packet)
                 {
@@ -266,8 +161,108 @@ impl Client {
                 }
             }
 
-            if self.gamestate.kill {
+            // Most recent version of player.
+            let player = self.player();
+
+            canvas.clear();
+            canvas.set_draw_color(Color::BLACK);
+
+            // Renders the background and gamestate entities.
+            // Move the background / map.
+            let offset = camera.center_offset(&player.position());
+            bg.set_x(offset.x().round() as i32);
+            bg.set_y(offset.y().round() as i32);
+            canvas.copy(&background_texture, None, Some(bg))?;
+
+            self.gamestate.draw(&mut canvas, &camera);
+            canvas.present();
+
+            // Update the input tracker.
+            let mut velocity: Vec2 = Vec2::ORIGIN;
+            input.update(&mut event_pump);
+            if self.gamestate.kill || input.keyboard.esc_pressed {
                 break 'running;
+            } else if input.mouse.left_held() {
+                held_move = true;
+            }
+
+            // Update the movement towards the mouse pointer.
+            if input.mouse.left_clicked() || input.mouse.left_held() {
+                if let Some(target) = input.mouse.last_target {
+                    let (x, y) = target.as_tuple();
+                    let (dx, dy) = (x - camera.true_center().x(), y - camera.true_center().y());
+                    move_to = Some(Vec2::new(
+                        player.position().x() + dx,
+                        player.position().y() + dy,
+                    ));
+                }
+            } else if !input.mouse.left_held() && held_move {
+                held_move = false;
+                move_to = None;
+            }
+
+            // Update the projectile towards the mouse pointer.
+            let mut projectile: Vec2 = Vec2::ORIGIN;
+            if input.mouse.right_clicked() || input.mouse.right_held() {
+                if let Some(target) = input.mouse.last_target {
+                    let (x, y) = target.as_tuple();
+                    let bb = player.bounding_box();
+                    let (dx, dy) = (
+                        x - camera.true_center().x() - bb.width() / 2.,
+                        y - camera.true_center().y() - bb.height() / 2.,
+                    );
+                    let mut focus = Some(Vec2::new(
+                        player.position().x() + dx,
+                        player.position().y() + dy,
+                    ));
+
+                    projectile = get_velocity(player.position(), &mut focus);
+                }
+            }
+
+            // Calculate movement based on keyboard actions.
+            if input.keyboard.movement_pressed() {
+                if input.keyboard.w_pressed {
+                    velocity.set_y(-1.); // Move up
+                }
+                if input.keyboard.a_pressed {
+                    velocity.set_x(-1.); // Move left
+                }
+                if input.keyboard.s_pressed {
+                    velocity.set_y(1.); // Move down
+                }
+                if input.keyboard.d_pressed {
+                    velocity.set_x(1.); // Move right
+                }
+
+                velocity = velocity.scaled(move_speed);
+                move_to = None;
+            } else if move_to.is_some() {
+                velocity = get_velocity(player.position(), &mut move_to);
+            }
+
+            // Produces a packet that we have moved to send to server.
+            if velocity != Vec2::ORIGIN && (move_to.is_some() || input.keyboard.movement_pressed())
+            {
+                self.send(
+                    Action::Movement,
+                    Payload::Movement(MovementPayload::new(
+                        player.size(),
+                        player.position(),
+                        velocity,
+                    )),
+                );
+            }
+
+            if projectile != Vec2::ORIGIN {
+                let area = Bounds::from_vec(player.position(), player.size());
+                let size = Vec2::new(16., 16.);
+                let loc = place_outside(&area, projectile, size);
+
+                self.send(
+                    Action::Projectile,
+                    Payload::Movement(MovementPayload::new(size, loc, projectile)),
+                );
             }
 
             thread::sleep(self.gamestate.timers.client_tick_time());
@@ -277,28 +272,44 @@ impl Client {
     }
 }
 
-fn calc_trajectory(
-    start: Position,
-    move_speed: f32,
-    target: &mut Option<(i32, i32)>,
-) -> (f32, f32) {
+/// Obtains the velocity required to move between start and target.
+fn get_velocity(start: Vec3, target: &mut Option<Vec2>) -> Vec2 {
     if let Some(tar) = target {
-        let (px, py) = (start.0 as f32, start.1 as f32);
-        let (tx, ty) = (tar.0 as f32, tar.1 as f32);
+        let (px, py) = (start.x(), start.y());
+        let (tx, ty) = tar.as_tuple();
 
-        if (px - tx).abs() > move_speed || (py - ty).abs() > move_speed {
-            // Calculate direction vector.
-            let dx = tx - px;
-            let dy = ty - py;
-            let mag = (dx.powi(2) + dy.powi(2)).sqrt();
-
-            // Calculate and store trajectory vector.
-            (dx / mag, dy / mag)
-        } else {
+        // Velocity required.
+        let vel = Vec2::new(tx - px, ty - py);
+        if vel.length() < 1.0 {
+            // Set velocity to 0 if we are already close by.
             *target = None;
-            (0.0, 0.0)
+            Vec2::new(0., 0.)
+        } else {
+            vel
         }
     } else {
-        (0.0, 0.0)
+        // Set velocity to 0 if there is not target.
+        Vec2::new(0., 0.)
     }
+}
+
+/// Gets the nearest coordinates that an object of `size` can exist in relation to the current object at the specified velocity.
+pub fn place_outside(mobile: &Bounds, velocity: Vec2, size: Vec2) -> Vec3 {
+    let center: Vec2 = mobile.center_2d(); // Center of hitbox coordinate.
+    let min_dist: f64 = center.distance(&mobile.top_left_2d()); // Center to top corner (furthest)
+    let (dx, dy) = size.apply_scalar(0.5).as_tuple();
+
+    // Get normalize the velocity.
+    let mut direction = velocity.normalize();
+
+    // Calculate the additional distance needed to place the object outside, considering its size.
+    let extra_dist = (size.x().max(size.y()) / 2.0) + min_dist;
+    direction = direction.scaled(extra_dist);
+
+    // Calculate the new position in the direction of the velocity.
+    let new_pos = Vec2::new(
+        center.x() + direction.x() - dx,
+        center.y() + direction.y() - dy,
+    );
+    Vec3::new(new_pos.x(), new_pos.y(), 1.)
 }

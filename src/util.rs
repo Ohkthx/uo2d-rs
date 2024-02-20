@@ -31,6 +31,7 @@ pub fn get_now() -> u64 {
 }
 
 /// Taste the rainbow.
+#[allow(dead_code)]
 pub fn exec_rainbow((r, g, b): (u8, u8, u8), step: u8) -> (u8, u8, u8) {
     if r == 255 && g < 255 && b == 0 {
         return (255, g.saturating_add(step), 0);

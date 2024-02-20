@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::object::Position;
+use crate::components::{Vec2, Vec3};
 
 /// Message payload, only contains text.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -34,20 +34,18 @@ impl UuidPayload {
 /// Movement payload, used to send current position for an entity.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MovementPayload {
-    pub size: (u16, u16),
-    pub position: Position,
-    pub trajectory: (f32, f32),
-    pub speed: f32,
+    pub size: Vec2,
+    pub position: Vec3,
+    pub velocity: Vec2,
 }
 
 impl MovementPayload {
     /// Create a new position payload.
-    pub fn new(size: (u16, u16), position: Position, trajectory: (f32, f32), speed: f32) -> Self {
+    pub fn new(size: Vec2, position: Vec3, velocity: Vec2) -> Self {
         Self {
             size,
             position,
-            trajectory,
-            speed,
+            velocity,
         }
     }
 }
