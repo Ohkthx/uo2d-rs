@@ -49,7 +49,9 @@ impl Client {
     }
 
     fn player(&self) -> &Mobile {
-        self.gamestate.get_entity(&self.uuid()).unwrap()
+        self.gamestate
+            .get_mobile(&self.gamestate.get_player())
+            .unwrap()
     }
 
     /// Starts the client, this begins the remote listerning and graphics.
@@ -70,7 +72,11 @@ impl Client {
         }
 
         // Add the client as a player.
-        cprintln!("Player UUID: {}", client.uuid());
+        cprintln!(
+            "Player [{}] UUID: {}",
+            client.gamestate.get_player(),
+            client.uuid()
+        );
 
         // Run the SDL2 game loop on the main thread.
         client.gameloop()?;
@@ -137,8 +143,7 @@ impl Client {
         input.mouse.set_delay(10);
         let mut held_move: bool = false;
 
-        let move_speed = 5.0;
-        let mut move_to: Option<Vec2> = None;
+        let move_speed = 32.0;
 
         'running: loop {
             for timer in self.gamestate.timers.update() {
@@ -148,12 +153,6 @@ impl Client {
             // Process the data from the server if there is any.
             let packets = self.socket.get_packets();
             for packet in packets.into_iter() {
-                if packet.uuid() == self.uuid() {
-                    if let Payload::Movement(movement) = packet.payload() {
-                        camera.center_on(movement.position);
-                    }
-                }
-
                 if let Some((action, payload)) =
                     self.socket.process_packet(&mut self.gamestate, packet)
                 {
@@ -161,8 +160,9 @@ impl Client {
                 }
             }
 
-            // Most recent version of player.
+            // Most recent version of player, update camera.
             let player = self.player();
+            camera.center_on(player.position());
 
             canvas.clear();
             canvas.set_draw_color(Color::BLACK);
@@ -187,6 +187,8 @@ impl Client {
             }
 
             // Update the movement towards the mouse pointer.
+            let mut move_to: Option<Vec2> = None;
+            let mut stopped: bool = false;
             if input.mouse.left_clicked() || input.mouse.left_held() {
                 if let Some(target) = input.mouse.last_target {
                     let (x, y) = target.as_tuple();
@@ -197,8 +199,10 @@ impl Client {
                     ));
                 }
             } else if !input.mouse.left_held() && held_move {
+                // Let go and stop movement.
                 held_move = false;
                 move_to = None;
+                stopped = true; // Used to send no velocity to server.
             }
 
             // Update the projectile towards the mouse pointer.
@@ -223,30 +227,31 @@ impl Client {
             // Calculate movement based on keyboard actions.
             if input.keyboard.movement_pressed() {
                 if input.keyboard.w_pressed {
-                    velocity.set_y(-1.); // Move up
+                    velocity.set_y(-move_speed); // Move up
                 }
                 if input.keyboard.a_pressed {
-                    velocity.set_x(-1.); // Move left
+                    velocity.set_x(-move_speed); // Move left
                 }
                 if input.keyboard.s_pressed {
-                    velocity.set_y(1.); // Move down
+                    velocity.set_y(move_speed); // Move down
                 }
                 if input.keyboard.d_pressed {
-                    velocity.set_x(1.); // Move right
+                    velocity.set_x(move_speed); // Move right
                 }
 
-                velocity = velocity.scaled(move_speed);
-                move_to = None;
+                move_to = None; // Override the mouse clicking.
             } else if move_to.is_some() {
                 velocity = get_velocity(player.position(), &mut move_to);
             }
 
-            // Produces a packet that we have moved to send to server.
+            // Produces a packet that we have moved to send to server or that we wish to stop movement.
             if velocity != Vec2::ORIGIN && (move_to.is_some() || input.keyboard.movement_pressed())
+                || stopped
             {
                 self.send(
                     Action::Movement,
                     Payload::Movement(MovementPayload::new(
+                        player.entity,
                         player.size(),
                         player.position(),
                         velocity,
@@ -261,11 +266,16 @@ impl Client {
 
                 self.send(
                     Action::Projectile,
-                    Payload::Movement(MovementPayload::new(size, loc, projectile)),
+                    Payload::Movement(MovementPayload::new(player.entity, size, loc, projectile)),
                 );
             }
 
-            thread::sleep(self.gamestate.timers.client_tick_time());
+            thread::sleep(
+                self.gamestate
+                    .timers
+                    .client_tick_time()
+                    .saturating_sub(self.gamestate.timers.tick_time()),
+            );
         }
 
         Ok(())

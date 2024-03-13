@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::Path};
 
 use serde::Deserialize;
 
-use crate::components::{Bounds, Transform, Vec3};
+use crate::components::{Bounds, Transform, Vec2, Vec3};
 use crate::sprintln;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -10,6 +10,7 @@ pub struct Region {
     pub name: String,
     pub description: String,
     pub spawn: Vec3,
+    pub tile: f64,
     pub file: String,
     #[serde(rename = "vertices")]
     transform: Transform,
@@ -35,6 +36,38 @@ impl Region {
     /// Obtains the bounding box for region.
     pub fn bounding_box(&self) -> Bounds {
         self.transform.bounding_box()
+    }
+
+    /// Size of a tile within the region.
+    pub fn tile_size(&self) -> Vec2 {
+        Vec2::new(self.tile, self.tile)
+    }
+
+    /// Length of a tile within the region.
+    pub fn tile_length(&self) -> f64 {
+        self.tile * f64::sqrt(2.0)
+    }
+
+    /// Aligns the coordinate within bounds.
+    pub fn align_coord(&self, coord: Vec3) -> Vec3 {
+        let x = self.align(coord.x().round());
+        let y = self.align(coord.y().round());
+        self.bounding_box()
+            .clamp_coord_within(Vec3::new(x, y, coord.z()))
+    }
+
+    /// Aligns the position within a multiple of the tile size.
+    fn align(&self, pos: f64) -> f64 {
+        if pos >= 0.0 {
+            let multiple = (pos / self.tile).floor() * self.tile;
+            if multiple > pos {
+                multiple - self.tile
+            } else {
+                multiple
+            }
+        } else {
+            (pos / self.tile).floor() * self.tile
+        }
     }
 }
 

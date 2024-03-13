@@ -27,10 +27,12 @@ impl Bounds {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_x(&mut self, value: f64) {
         self.data.set_x(value)
     }
 
+    #[allow(dead_code)]
     pub fn set_y(&mut self, value: f64) {
         self.data.set_y(value)
     }
@@ -130,8 +132,8 @@ impl Bounds {
 
     /// Checks if a coordinate is within the bounds, assuming exclusive upper bounds.
     pub fn coord_within_2d(&self, coord: &Vec3) -> bool {
-        (self.x() <= coord.x() && coord.x() < self.x() + self.width)
-            && (self.y() <= coord.y() && coord.y() < self.y() + self.height)
+        (self.x() <= coord.x() && coord.x() <= self.x() + self.width)
+            && (self.y() <= coord.y() && coord.y() <= self.y() + self.height)
     }
 
     /// Checks if a coordinate is within the bounds, assuming exclusive upper bounds.
@@ -145,6 +147,7 @@ impl Bounds {
     }
 
     /// Checks if this bounds completely contains another.
+    #[allow(dead_code)]
     pub fn contains_2d(&self, other: &Self) -> bool {
         // Check if the top-left corner of other is inside self.
         let top_left_inside = self.x() <= other.x() && self.y() <= other.y();
@@ -159,12 +162,12 @@ impl Bounds {
     /// Checks if this bounds intersects with another.
     pub fn intersects_2d(&self, other: &Self) -> bool {
         // Check if one bounding box is to the left of the other.
-        if self.x() + self.width < other.x() || other.x() + other.width < self.x() {
+        if self.x() + self.width <= other.x() || other.x() + other.width <= self.x() {
             return false;
         }
 
         // Check if one bounds is above the other.
-        if self.y() + self.height < other.y() || other.y() + other.height < self.y() {
+        if self.y() + self.height <= other.y() || other.y() + other.height <= self.y() {
             return false;
         }
 
@@ -195,6 +198,30 @@ impl Bounds {
 
         // Create a bounds.
         Bounds::new(x, y, self.z(), new_width, new_height)
+    }
+
+    /// Clamps another bounding box within.
+    pub fn clamp_within(&self, other: &Self) -> Self {
+        if other.width > self.width || other.height > self.height {
+            return *other;
+        }
+
+        // Attempt to clamp `other` within `self`.
+        let clamped_x = other
+            .x()
+            .clamp(self.x(), self.x() + self.width() - other.width());
+        let clamped_y = other
+            .y()
+            .clamp(self.y(), self.y() + self.height() - other.height());
+
+        Bounds::new(clamped_x, clamped_y, other.z(), other.width, other.height)
+    }
+
+    /// Clamps a vec3 within the bounds.
+    pub fn clamp_coord_within(&self, coord: Vec3) -> Vec3 {
+        let x = coord.x().clamp(self.x(), self.x() + self.width());
+        let y = coord.y().clamp(self.y(), self.y() + self.height());
+        Vec3::new(x, y, coord.z())
     }
 }
 

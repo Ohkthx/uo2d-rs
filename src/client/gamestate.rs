@@ -2,18 +2,18 @@ use std::collections::HashMap;
 
 use sdl2::render::WindowCanvas;
 
-use uuid::Uuid;
-
 use crate::components::{Vec2, Vec3};
-use crate::entities::{Camera, Mobile, MobileType};
+use crate::ecs::Entity;
+use crate::entities::{Camera, Mobile};
 use crate::timer::TimerManager;
 
 /// Current tracked state of the game.
 pub struct Gamestate {
     pub timers: TimerManager,
-    locations: HashMap<Uuid, i8>,
-    pub entities: HashMap<i8, HashMap<Uuid, Mobile>>,
+    locations: HashMap<Entity, i8>,
+    pub entities: HashMap<i8, HashMap<Entity, Mobile>>,
     pub kill: bool,
+    player: Entity,
 }
 
 impl Gamestate {
@@ -24,38 +24,50 @@ impl Gamestate {
             locations: HashMap::new(),
             entities: HashMap::new(),
             kill: false,
+            player: Entity::INVALID,
         }
     }
 
-    // Get an entity by its UUID
-    pub fn get_entity(&self, uuid: &Uuid) -> Option<&Mobile> {
-        if let Some(layer) = self.locations.get(uuid) {
+    /// Sets the player / entity belonging to the client.
+    pub fn set_player(&mut self, entity: Entity) {
+        self.player = entity;
+    }
+
+    /// Obtains the entity representing the client.
+    pub fn get_player(&self) -> Entity {
+        self.player
+    }
+
+    // Get a mobile by its entity.
+    pub fn get_mobile(&self, entity: &Entity) -> Option<&Mobile> {
+        if let Some(layer) = self.locations.get(entity) {
             if let Some(entities) = self.entities.get(layer) {
-                return entities.get(uuid);
+                return entities.get(entity);
             }
         }
         None
     }
 
     /// Updates an entity's position and size, if it exists, or inserts a new entity.
-    pub fn upsert_entity(&mut self, uuid: Uuid, position: Vec3, size: Vec2) {
+    pub fn upsert_entity(&mut self, entity: Entity, position: Vec3, size: Vec2) {
         // Create or update the entity with its new or existing color.
-        let entity = Mobile::new(uuid, position, size, MobileType::Creature);
+        let mobile = Mobile::new(entity, position, size);
 
         // Assign entity to the new layer and update locations mapping.
-        self.locations.insert(uuid, position.z() as i8);
+        self.locations.insert(entity, position.z() as i8);
         self.entities
             .entry(position.z() as i8)
             .or_default()
-            .insert(uuid, entity);
+            .insert(entity, mobile);
     }
 
-    pub fn remove_entity(&mut self, uuid: &Uuid) {
+    /// Removes an entity from being tracked.
+    pub fn remove_entity(&mut self, entity: &Entity) {
         // First, find the layer the entity is in using the locations map and remove the entry.
-        if let Some(layer) = self.locations.remove(uuid) {
+        if let Some(layer) = self.locations.remove(entity) {
             // Then, access the sub-map for the layer and attempt to remove the entity by its UUID.
             if let Some(entities) = self.entities.get_mut(&layer) {
-                entities.remove(uuid);
+                entities.remove(entity);
 
                 // Remove the layer if it is empty.
                 if entities.is_empty() {

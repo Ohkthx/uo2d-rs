@@ -1,6 +1,7 @@
 mod cache;
 mod client;
 mod components;
+mod ecs;
 mod entities;
 mod packet;
 mod server;

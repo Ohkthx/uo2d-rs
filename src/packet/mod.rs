@@ -64,6 +64,7 @@ pub enum Payload {
     Empty,
     Invalid,
     Uuid(UuidPayload),
+    Entity(EntityPayload),
     Message(MessagePayload),
     Movement(MovementPayload),
 }

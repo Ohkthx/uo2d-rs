@@ -58,11 +58,19 @@ impl Transform {
     }
 
     /// Applies a velocity where bounds is the limitation, returning a new transform.
-    pub fn applied_velocity(&self, velocity: &Vec2, bounds: &Bounds) -> Self {
+    pub fn applied_velocity(&self, velocity: &Vec2, bounds: &Bounds, slip: bool) -> Self {
         let step_size = 1.0;
         let mut vel = *velocity;
         let (x, y, z) = self.position().as_tuple();
         let (width, height) = self.bounding_box().dimensions().as_tuple();
+
+        // Allow to slip along nullifying a portion of the velocity instead of stopping.
+        if slip {
+            let mut transform = self.clone();
+            transform.set_position(&Vec3::new(x + vel.x(), y + vel.y(), z));
+            transform = Transform::from_bounds(bounds.clamp_within(&transform.bounding_box()));
+            return transform;
+        }
 
         while vel != Vec2::ORIGIN {
             let (mod_x, mod_y) = (x + vel.x(), y + vel.y());

@@ -17,6 +17,7 @@ use self::gamestate::Gamestate;
 mod gamestate;
 mod packet_processor;
 pub mod socket_server;
+pub mod systems;
 
 /// Holds all of the relevant client information for send/recving packets.
 #[derive(Clone)]

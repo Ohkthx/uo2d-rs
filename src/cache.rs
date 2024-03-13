@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as SyncMutex};
 
@@ -55,7 +55,7 @@ impl PacketCacheSync {
 pub struct PacketCacheAsync {
     /// Counts of each packet signature
     counts: Arc<AsyncMutex<HashMap<Vec<u8>, usize>>>,
-    packets: Arc<AsyncMutex<Vec<Packet>>>,
+    packets: Arc<AsyncMutex<VecDeque<Packet>>>,
     allowed_duplicates: usize,
 }
 
@@ -64,7 +64,7 @@ impl PacketCacheAsync {
     pub fn new(allowed_duplicates: usize) -> Self {
         Self {
             counts: Arc::new(AsyncMutex::new(HashMap::new())),
-            packets: Arc::new(AsyncMutex::new(Vec::new())),
+            packets: Arc::new(AsyncMutex::new(VecDeque::new())),
             allowed_duplicates,
         }
     }
@@ -75,7 +75,7 @@ impl PacketCacheAsync {
         let mut packets = self.packets.lock().await;
 
         counts.clear();
-        std::mem::take(&mut *packets)
+        std::mem::take(&mut *packets).into()
     }
 
     /// Add a new packet to the cache if it doesn't exceed allowed duplicates.
@@ -85,12 +85,19 @@ impl PacketCacheAsync {
         let signature = packet.signature();
         let count = counts.entry(signature.to_vec()).or_insert(0);
 
-        if *count <= self.allowed_duplicates {
+        if *count < self.allowed_duplicates {
             *count += 1;
-
+        } else {
+            // If we already have the allowed number of duplicates, remove the oldest packet with the same signature.
             let mut packets = self.packets.lock().await;
-            packets.push(packet);
+            if let Some(position) = packets.iter().position(|p| p.signature() == signature) {
+                packets.remove(position);
+            }
         }
+
+        // Add the new packet.
+        let mut packets = self.packets.lock().await;
+        packets.push_back(packet);
     }
 }
 

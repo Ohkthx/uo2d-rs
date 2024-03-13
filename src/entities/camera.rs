@@ -7,11 +7,17 @@ pub struct Camera {
 }
 
 impl Camera {
+    /// Creates a new camera instance.
     pub fn new(position: Vec3, size: Vec2) -> Self {
         let bounds = Bounds::from_vec(position, size);
         Self {
             transform: Transform::from_bounds(bounds),
         }
+    }
+
+    /// Current position of the camera.
+    pub fn position(&self) -> Vec3 {
+        self.transform.position()
     }
 
     /// Centers the camera on a coordinate.
@@ -31,6 +37,7 @@ impl Camera {
             .intersects_2d(&other.bounding_box())
     }
 
+    /// Bounding box for the camera.
     pub fn bounding_box(&self) -> Bounds {
         self.transform.bounding_box()
     }

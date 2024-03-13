@@ -1,6 +1,7 @@
 name: "Floor 2"
 description: "A description here."
 spawn: [1600, 300, 1]
+tile: 32
 file: "assets/background.png"
 vertices:
   - [1088, 0, 0]

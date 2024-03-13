@@ -19,9 +19,9 @@ pub(crate) fn processor(
         Action::Shutdown => shutdown(gamestate),
         Action::Message => message(puuid, payload),
         Action::ClientJoin => client_join(gamestate, puuid, payload),
-        Action::ClientLeave => client_leave(gamestate, puuid),
-        Action::Movement => movement(gamestate, puuid, payload),
-        Action::EntityDelete => entity_remove(gamestate, puuid),
+        Action::ClientLeave => client_leave(gamestate, puuid, payload),
+        Action::Movement => movement(gamestate, payload),
+        Action::EntityDelete => entity_remove(gamestate, payload),
         _ => None,
     }
 }
@@ -47,7 +47,8 @@ fn success(
     };
 
     client.uuid = uuid;
-    gamestate.upsert_entity(uuid, payload.position, payload.size);
+    gamestate.set_player(payload.entity);
+    gamestate.upsert_entity(payload.entity, payload.position, payload.size);
     None
 }
 
@@ -78,27 +79,35 @@ fn client_join(
     };
 
     cprintln!("{} has joined.", uuid);
-    gamestate.upsert_entity(uuid, payload.position, payload.size);
+    gamestate.upsert_entity(payload.entity, payload.position, payload.size);
     None
 }
 
-fn client_leave(gamestate: &mut Gamestate, uuid: Uuid) -> Option<(Action, Payload)> {
+fn client_leave(
+    gamestate: &mut Gamestate,
+    uuid: Uuid,
+    payload: Payload,
+) -> Option<(Action, Payload)> {
     cprintln!("{} has left.", uuid);
-    gamestate.remove_entity(&uuid);
-    None
+    entity_remove(gamestate, payload)
 }
 
-fn movement(gamestate: &mut Gamestate, uuid: Uuid, payload: Payload) -> Option<(Action, Payload)> {
+fn movement(gamestate: &mut Gamestate, payload: Payload) -> Option<(Action, Payload)> {
     let payload = match payload {
         Payload::Movement(data) => data,
         _ => return None,
     };
 
-    gamestate.upsert_entity(uuid, payload.position, payload.size);
+    gamestate.upsert_entity(payload.entity, payload.position, payload.size);
     None
 }
 
-fn entity_remove(gamestate: &mut Gamestate, uuid: Uuid) -> Option<(Action, Payload)> {
-    gamestate.remove_entity(&uuid);
+fn entity_remove(gamestate: &mut Gamestate, payload: Payload) -> Option<(Action, Payload)> {
+    let payload = match payload {
+        Payload::Entity(data) => data,
+        _ => return None,
+    };
+
+    gamestate.remove_entity(&payload.entity);
     None
 }

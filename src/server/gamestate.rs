@@ -1,44 +1,54 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::thread::sleep;
 
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
-use crate::components::{Bounds, Vec2, Vec3};
-use crate::entities::{Mobile, MobileType, Region, RegionManager};
-use crate::packet::payloads::MovementPayload;
+use crate::components::{Bounds, Player, Position, Projectile, Vec2, Vec3, Velocity};
+use crate::ecs::{Entity, World};
+use crate::entities::{Region, RegionManager};
+use crate::packet::payloads::{EntityPayload, MovementPayload};
 use crate::packet::{Action, BroadcastScope, Packet, PacketConfiguration, Payload};
 use crate::spatial_hash::SpatialHash;
 use crate::sprintln;
 use crate::timer::{TimerData, TimerManager};
 
-use super::PacketCacheAsync;
+use super::systems::movement::{self};
+use super::{systems, PacketCacheAsync};
 
 /// Ensures the integrity of the game.
 pub struct Gamestate {
+    world: World,
     sender: Sender<PacketConfiguration>,
     timers: TimerManager,
     cache: PacketCacheAsync,
     spatial: SpatialHash,
-    entities: HashMap<Uuid, Mobile>,
     regions: RegionManager,
+    players: HashMap<Uuid, Entity>,
 }
 
 impl Gamestate {
     const PROJECTILE_LIFESPAN: f32 = 10.0;
-    const MAX_SPEED: f64 = 5.;
 
     /// Create a new Gamestate.
     pub fn new(tx: Sender<PacketConfiguration>, cache: PacketCacheAsync) -> Self {
         let regions = RegionManager::new();
 
+        // Create the world and register the components.
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+        world.register_component::<Player>();
+        world.register_component::<Projectile>();
+
         Self {
+            world,
             sender: tx,
             timers: TimerManager::new(),
             cache,
-            entities: HashMap::new(),
             spatial: SpatialHash::new(32),
             regions,
+            players: HashMap::new(),
         }
     }
 
@@ -59,12 +69,49 @@ impl Gamestate {
         self.regions.get_region(position)
     }
 
-    /// Remove an entity.
-    fn remove_entity(&mut self, uuid: &Uuid) {
-        if let Some(entity) = self.entities.remove(uuid) {
-            self.spatial
-                .remove_object(&entity.uuid, &entity.transform.bounding_box())
+    /// Obtains a player based on its UUID.
+    pub fn get_player(&self, uuid: &Uuid) -> Option<(Entity, Player)> {
+        if let Some(entity) = self.players.get(uuid) {
+            if let Some(player) = self.world.get_component::<Player>(entity) {
+                return Some((*entity, *player));
+            }
         }
+
+        None
+    }
+
+    /// Remove a player.
+    fn remove_player(&mut self, uuid: &Uuid) -> Option<(Entity, Player)> {
+        if let Some((entity, player)) = self.get_player(uuid) {
+            if let Some(pos) = self.world.get_component::<Position>(&entity) {
+                // Remove space it is taking up.
+                let bounds = Bounds::from_vec(pos.loc, pos.size);
+                self.spatial.remove_object(&entity, &bounds)
+            }
+
+            // Remove / despawn the entity from the ECS.
+            self.world.despawn(&entity);
+            return Some((entity, player));
+        }
+
+        None
+    }
+
+    /// Add a new player.
+    fn add_player(&mut self, uuid: Uuid) -> (Entity, Player, Position) {
+        let position = Position::new(self.get_spawn_region().spawn, Vec2::new(32., 32.));
+        let player = Player::new(uuid);
+
+        // Add player to the world and gamestate for tracking.
+        let entity = self.world.spawn().with(position).with(player).build();
+        self.players.insert(*player.uuid(), entity);
+
+        (entity, player, position)
+    }
+
+    /// Obtain all nearby players.
+    fn get_nearby(&self, player: &Entity, range: f64) -> Vec<(Entity, Player)> {
+        movement::get_nearby(&self.world, &self.spatial, player, range)
     }
 
     /// Starts the servers gameloop.
@@ -75,69 +122,87 @@ impl Gamestate {
 
         'running: loop {
             for timer in self.timers.update() {
-                if let TimerData::EntityDelete(uuid) = timer.data {
-                    if let Some(entity) = self.entities.get(&uuid) {
-                        let range = entity.transform.bounding_box().scaled_center(10.);
-                        let nearby = self.spatial.query(&range, Some(&uuid));
-                        let _ = self.sender.try_send(PacketConfiguration::Broadcast(
-                            Packet::new(Action::EntityDelete, uuid, Payload::Empty),
-                            BroadcastScope::Local(nearby),
-                        ));
-                        self.remove_entity(&uuid);
-                    }
+                if let TimerData::EntityDelete(entity) = timer.data {
+                    let nearby: HashSet<Uuid> = self
+                        .get_nearby(&entity, 10.)
+                        .iter()
+                        .map(|(_e, p)| *p.uuid())
+                        .collect();
+
+                    self.world.despawn(&entity);
+
+                    // Send a packet to nearby players that it has been despawned.
+                    let _ = self.sender.try_send(PacketConfiguration::Broadcast(
+                        Packet::new(
+                            Action::EntityDelete,
+                            Uuid::nil(),
+                            Payload::Entity(EntityPayload::new(entity)),
+                        ),
+                        BroadcastScope::Local(nearby),
+                    ));
                 }
             }
 
-            self.update();
-
-            // Process the data from the server if there is any.
+            // Process the data from the clients if there is any.
             let packets = self.get_packets().await;
             for packet in packets.into_iter() {
                 let uuid = packet.uuid();
                 match packet.action() {
                     Action::Shutdown => break 'running,
                     Action::ClientJoin => self.join(uuid),
-                    Action::ClientLeave => self.remove_entity(&uuid),
+                    Action::ClientLeave => self.leave(&uuid),
                     Action::Movement => self.movement(uuid, packet.payload()),
-                    Action::Projectile => self.projectile(uuid, packet.payload()),
+                    Action::Projectile => self.projectile(packet.payload()),
                     _ => (),
                 };
             }
-            sleep(self.timers.server_tick_time());
+
+            self.update();
+            sleep(
+                self.timers
+                    .server_tick_time()
+                    .saturating_sub(self.timers.tick_time()),
+            );
         }
     }
 
     fn join(&mut self, uuid: Uuid) {
-        let position: Vec3 = self.get_spawn_region().spawn;
-        sprintln!("Spawn set to: {:?}", position);
-        let size = Vec2::new(32., 32.);
-
-        self.entities
-            .entry(uuid)
-            .or_insert_with(|| Mobile::new(uuid, position, size, MobileType::Creature));
-
-        let entity = match self.entities.get(&uuid) {
-            None => return,
-            Some(entity) => entity,
-        };
-        self.spatial.insert_object(&uuid, &entity.bounding_box());
+        let (entity, _player, position) = self.add_player(uuid);
+        sprintln!("Player [{}] {} joined.", entity, uuid);
 
         let payload = Payload::Movement(MovementPayload::new(
-            entity.bounding_box().dimensions(),
-            entity.bounding_box().top_left_3d(),
+            entity,
+            position.size,
+            position.loc,
             Vec2::ORIGIN,
         ));
 
-        // The scope of who to send these packets to.
-        let range = entity.bounding_box().scaled_center(10.);
-        let nearby = self.spatial.query(&range, Some(&uuid));
-        let scope = BroadcastScope::Local(nearby);
+        let nearby = self
+            .get_nearby(&entity, 10.)
+            .into_iter()
+            .map(|(_e, p)| *p.uuid())
+            .collect();
 
         let _ = self.sender.try_send(PacketConfiguration::SuccessBroadcast(
             Packet::new(Action::Success, uuid, payload.clone()),
             Packet::new(Action::ClientJoin, uuid, payload),
-            scope,
+            BroadcastScope::Local(nearby),
         ));
+    }
+
+    fn leave(&mut self, uuid: &Uuid) {
+        if let Some((entity, _player)) = self.remove_player(uuid) {
+            sprintln!("Player [{}] {} left.", entity, uuid);
+
+            let _ = self.sender.try_send(PacketConfiguration::Broadcast(
+                Packet::new(
+                    Action::ClientLeave,
+                    *uuid,
+                    Payload::Entity(EntityPayload::new(entity)),
+                ),
+                BroadcastScope::Global,
+            ));
+        }
     }
 
     fn movement(&mut self, uuid: Uuid, movement: Payload) {
@@ -146,127 +211,46 @@ impl Gamestate {
             _ => return,
         };
 
-        // Only move valid existing entities.
-        let entity = match self.entities.get(&uuid) {
-            None => return,
-            Some(entity) => entity,
-        };
-
-        // Try to locate the region.
-        let region = match self.get_region(&entity.transform.position()) {
-            Some(region) => region.clone(),
-            None => {
-                sprintln!("Unable to find region for {}", entity.uuid);
-                return;
-            }
-        };
-
-        // Get the attempted movement.
-        let velocity = movement.velocity.clamped(0.0, Self::MAX_SPEED);
-        let mut query = entity.check_move(&mut self.spatial, &region, velocity);
-
-        let pos = match SpatialHash::till_collisions(&query, &self.entities) {
-            Some(pos) => pos,
-            None => {
-                // Unavoidable collision detected.
-                query.source
-            }
-        };
-
-        // Perform move.
-        if let Some(mobile) = self.entities.get_mut(&uuid) {
-            query.destination = pos;
-            mobile.move_entity(&mut self.spatial, &query);
-            if query.has_moved() {
-                let _ = self.sender.try_send(PacketConfiguration::Broadcast(
-                    Packet::new(
-                        Action::Movement,
-                        uuid,
-                        Payload::Movement(MovementPayload::new(
-                            movement.size,
-                            mobile.transform.position(),
-                            movement.velocity,
-                        )),
-                    ),
-                    // Movement will only be sent to the nearby entities.
-                    BroadcastScope::Local(query.nearby),
-                ));
-            }
+        if let Some((entity, _player)) = self.get_player(&uuid) {
+            self.world
+                .upsert_component(entity, Velocity(movement.velocity));
         }
     }
 
-    fn projectile(&mut self, uuid: Uuid, payload: Payload) {
-        let movement = match payload.clone() {
+    fn projectile(&mut self, payload: Payload) {
+        let movement = match payload {
             Payload::Movement(movement) => movement,
             _ => return,
         };
 
-        // Try to locate the region and only spawn if it is within region bounds.
-        match self.get_region(&movement.position) {
-            Some(region) => {
-                let bounds = Bounds::from_vec(movement.position, movement.size);
-                if !region.is_inbounds(&bounds) {
-                    return;
-                }
-            }
-            None => return,
-        };
+        let position = Position::new(movement.position, movement.size);
+        let entity = self
+            .world
+            .spawn()
+            .with(position)
+            .with(Velocity(movement.velocity))
+            .with(Projectile {})
+            .build();
 
-        self.entities.entry(uuid).or_insert_with(|| {
-            Mobile::new(
-                uuid,
-                movement.position,
-                movement.size,
-                MobileType::Projectile,
-            )
-        });
-
-        let entity = match self.entities.get(&uuid) {
-            None => return,
-            Some(entity) => entity,
-        };
-        self.spatial
-            .insert_object(&entity.uuid, &entity.bounding_box());
-
+        // Projectiles have timed life.
         self.timers.add_timer_sec(
             Self::PROJECTILE_LIFESPAN,
-            TimerData::EntityDelete(uuid),
+            TimerData::EntityDelete(entity),
             true,
         );
-
-        self.movement(uuid, payload);
     }
 
     /// Called on every tick for the server.
     fn update(&mut self) {
-        let entities: Vec<Mobile> = self
-            .entities
-            .values()
-            .filter(|e| e.mobile_type == MobileType::Projectile)
-            .cloned()
-            .collect();
+        let mut packets: Vec<PacketConfiguration> = vec![];
+        packets.extend(systems::movement::with_velocity(
+            &mut self.world,
+            &mut self.spatial,
+            &self.regions,
+        ));
 
-        for entity in entities {
-            // Move autonomous entities.
-            if entity.has_moved && entity.last_position != entity.position() {
-                self.movement(
-                    entity.uuid,
-                    Payload::Movement(MovementPayload::new(
-                        entity.bounding_box().dimensions(),
-                        entity.bounding_box().top_left_3d(),
-                        entity.last_velocity,
-                    )),
-                )
-            } else {
-                // If it is stuck, delete it.
-                let range = entity.bounding_box().scaled_center(10.);
-                let nearby = self.spatial.query(&range, Some(&entity.uuid));
-                let _ = self.sender.try_send(PacketConfiguration::Broadcast(
-                    Packet::new(Action::EntityDelete, entity.uuid, Payload::Empty),
-                    BroadcastScope::Local(nearby),
-                ));
-                self.remove_entity(&entity.uuid);
-            }
+        for packet in packets.into_iter() {
+            let _ = self.sender.try_send(packet);
         }
     }
 }

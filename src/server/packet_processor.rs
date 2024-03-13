@@ -63,7 +63,7 @@ async fn client_join(packet_cache: &PacketCacheAsync, uuid: Uuid) -> PacketConfi
 async fn client_leave(packet_cache: &PacketCacheAsync, uuid: Uuid) -> PacketConfiguration {
     let packet = Packet::new(Action::ClientLeave, uuid, Payload::Empty);
     packet_cache.add(packet.clone()).await;
-    PacketConfiguration::Broadcast(packet, BroadcastScope::Global)
+    PacketConfiguration::Empty
 }
 
 async fn movement(

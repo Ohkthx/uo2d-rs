@@ -1,12 +1,12 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use uuid::Uuid;
+use crate::ecs::Entity;
 
 /// Data that is attached to the timer.
 #[derive(Debug)]
 pub enum TimerData {
     Empty,
-    EntityDelete(Uuid),
+    EntityDelete(Entity),
 }
 
 /// Allows for tracking of various time sensitive events.
@@ -43,13 +43,15 @@ pub struct TimerManager {
     server_tick: Duration,
     /// Duration of a tick for the client.
     client_tick: Duration,
+    /// Tick time tracker.
+    tick_start: Instant,
 }
 
 impl TimerManager {
-    const SERVER_TICKS_PER_SECOND: f32 = 180.0;
+    const SERVER_TICKS_PER_SECOND: f32 = 10.0;
     const SERVER_TICK_RATE_MICROSECOND: f32 = 1_000_000.0 / Self::SERVER_TICKS_PER_SECOND;
 
-    const CLIENT_TICKS_PER_SECOND: f32 = Self::SERVER_TICKS_PER_SECOND / 3.0;
+    const CLIENT_TICKS_PER_SECOND: f32 = Self::SERVER_TICKS_PER_SECOND * 3.0;
     const CLIENT_TICK_RATE_MICROSECOND: f32 = 1_000_000.0 / Self::CLIENT_TICKS_PER_SECOND;
 
     /// Creates a new manager for timers.
@@ -59,6 +61,7 @@ impl TimerManager {
             tick: 0,
             server_tick: Duration::from_micros(Self::SERVER_TICK_RATE_MICROSECOND.round() as u64),
             client_tick: Duration::from_micros(Self::CLIENT_TICK_RATE_MICROSECOND.round() as u64),
+            tick_start: Instant::now(),
         }
     }
 
@@ -66,6 +69,12 @@ impl TimerManager {
     #[allow(dead_code)]
     pub fn tick(&self) -> u64 {
         self.tick
+    }
+
+    /// Current tick the server is on in milliseconds.
+    #[allow(dead_code)]
+    pub fn tick_time(&self) -> Duration {
+        self.tick_start.elapsed()
     }
 
     /// Amount of time per server tick.
@@ -81,6 +90,7 @@ impl TimerManager {
     /// Removes and returns timers that have completed.
     pub fn update(&mut self) -> Vec<Timer> {
         self.tick += 1;
+        self.tick_start = Instant::now();
 
         // Find the index of the first non-expired timer
         let first_active_index = self

@@ -81,6 +81,14 @@ impl Vec2 {
         }
     }
 
+    /// Returns a clamped version of the vector based on min and max vectors.
+    pub fn clamp(&self, min: Vec2, max: Vec2) -> Vec2 {
+        Vec2::new(
+            self.x().min(max.x()).max(min.x()),
+            self.y().min(max.y()).max(min.y()),
+        )
+    }
+
     /// Moves a `step` towards origin.
     pub fn towards_origin(&self, step: f64) -> Self {
         let length = self.length();
